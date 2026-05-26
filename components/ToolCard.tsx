@@ -1,6 +1,36 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useId } from 'react';
+
+/** Supported tool names for icon and summary mapping */
+type ToolName = 'Read' | 'Write' | 'Edit' | 'Bash' | 'Glob' | 'Grep' | 'WebFetch' | 'WebSearch';
+
+/** Tool input parameters keyed by tool name */
+interface ToolInputMap {
+  Read: { file_path?: string };
+  Write: { file_path?: string };
+  Edit: { file_path?: string };
+  Bash: { command?: string };
+  Glob: { pattern?: string };
+  Grep: { pattern?: string };
+  WebFetch: { url?: string };
+  WebSearch: { query?: string };
+}
+
+/** Constant mapping of tool names to their display icons */
+const TOOL_ICONS: Record<ToolName, string> = {
+  Read: '📄',
+  Write: '✏️',
+  Edit: '🔧',
+  Bash: '💻',
+  Glob: '🔍',
+  Grep: '🔎',
+  WebFetch: '🌐',
+  WebSearch: '🔍',
+};
+
+/** Default icon for unknown tool names */
+const DEFAULT_ICON = '🛠️';
 
 interface ToolCall {
   id: string;
@@ -14,50 +44,46 @@ interface ToolCardProps {
   tool: ToolCall;
 }
 
+/**
+ * Displays a collapsible card for a tool call with input/result details.
+ *
+ * Features accessible expand/collapse with proper ARIA attributes,
+ * keyboard navigation, and screen reader support.
+ *
+ * @example
+ * ```tsx
+ * <ToolCard tool={{ id: '1', name: 'Read', input: { file_path: '/path' } }} />
+ * ```
+ */
 export function ToolCard({ tool }: ToolCardProps) {
   const [isExpanded, setIsExpanded] = useState(false);
+  const contentId = useId();
 
-  const getToolIcon = (name: string) => {
-    switch (name) {
-      case 'Read':
-        return '📄';
-      case 'Write':
-        return '✏️';
-      case 'Edit':
-        return '🔧';
-      case 'Bash':
-        return '💻';
-      case 'Glob':
-        return '🔍';
-      case 'Grep':
-        return '🔎';
-      case 'WebFetch':
-        return '🌐';
-      case 'WebSearch':
-        return '🔍';
-      default:
-        return '🛠️';
+  const getToolIcon = (name: string): string => {
+    if (name in TOOL_ICONS) {
+      return TOOL_ICONS[name as ToolName];
     }
+    return DEFAULT_ICON;
   };
 
-  const getToolSummary = (name: string, input: unknown) => {
+  const getToolSummary = (name: string, input: unknown): string => {
     if (typeof input !== 'object' || input === null) return name;
 
     const inputObj = input as Record<string, unknown>;
 
     switch (name) {
       case 'Read':
-        return `Read ${inputObj.file_path || 'file'}`;
+        return `Read ${(inputObj as ToolInputMap['Read']).file_path || 'file'}`;
       case 'Write':
-        return `Write ${inputObj.file_path || 'file'}`;
+        return `Write ${(inputObj as ToolInputMap['Write']).file_path || 'file'}`;
       case 'Edit':
-        return `Edit ${inputObj.file_path || 'file'}`;
+        return `Edit ${(inputObj as ToolInputMap['Edit']).file_path || 'file'}`;
       case 'Bash':
-        return `Run: ${inputObj.command || 'command'}`;
+        return `Run: ${(inputObj as ToolInputMap['Bash']).command || 'command'}`;
       case 'Glob':
-        return `Find: ${inputObj.pattern || 'pattern'}`;
+        return `Find: ${(inputObj as ToolInputMap['Glob']).pattern || 'pattern'}`;
       case 'Grep':
-        return `Search: ${inputObj.pattern || 'pattern'}`;
+        return `Search: ${(inputObj as ToolInputMap['Grep']).pattern || 'pattern'}`;
       default:
         return name;
     }
@@ -67,6 +93,8 @@ export function ToolCard({ tool }: ToolCardProps) {
     <div className="my-2 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
       <button
         onClick={() => setIsExpanded(!isExpanded)}
+        aria-expanded={isExpanded}
+        aria-controls={contentId}
         className="w-full px-4 py-2 text-left text-sm hover:bg-gray-50 dark:hover:bg-gray-800 flex items-center justify-between"
       >
         <span className="flex items-center">
@@ -86,13 +114,17 @@ export function ToolCard({ tool }: ToolCardProps) {
             fill="none"
             stroke="currentColor"
             viewBox="0 0 24 24"
+            aria-hidden="true"
           >
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
           </svg>
         </span>
       </button>
       {isExpanded && (
-        <div className="px-4 py-3 bg-gray-50 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700">
+        <div
+          id={contentId}
+          className="px-4 py-3 bg-gray-50 dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700"
+        >
           <div className="mb-2">
             <h4 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase mb-1">
               Input
