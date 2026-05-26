@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { AgentEvent, ChatResponse } from '@/lib/types';
 import { MessageList } from './MessageList';
 
@@ -16,20 +16,51 @@ export function ChatPanel() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [messageCounter, setMessageCounter] = useState(0);
+  const eventSourceRef = useRef<EventSource | null>(null);
+
+  // Cleanup EventSource on unmount to prevent memory leaks
+  useEffect(() => {
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+    };
+  }, []);
+
+  // Helper to update the last assistant message immutably
+  const updateLastAssistantMessage = useCallback((updater: (msg: Message) => Message) => {
+    setMessages((prev) => {
+      const newMessages = prev.map(msg => ({ ...msg }));
+      const lastIndex = newMessages.length - 1;
+      const lastMessage = newMessages[lastIndex];
+
+      if (lastMessage && lastMessage.role === 'assistant') {
+        newMessages[lastIndex] = updater(lastMessage);
+      }
+
+      return newMessages;
+    });
+  }, []);
 
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (!input.trim() || isLoading) return;
 
+    // Generate unique IDs using counter to avoid Date.now() collisions
+    const userMessageId = `user-${messageCounter}`;
+    const assistantMessageId = `assistant-${messageCounter + 1}`;
+    setMessageCounter(prev => prev + 2);
+
     const userMessage: Message = {
-      id: Date.now().toString(),
+      id: userMessageId,
       role: 'user',
       content: input.trim(),
     };
 
     const assistantMessage: Message = {
-      id: `assistant-${Date.now()}`,
+      id: assistantMessageId,
       role: 'assistant',
       content: '',
       events: [],
@@ -49,7 +80,8 @@ export function ChatPanel() {
       });
 
       if (!response.ok) {
-        throw new Error('Failed to start chat');
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || `HTTP ${response.status}: Failed to start chat`);
       }
 
       const { runId }: ChatResponse = await response.json();
@@ -57,87 +89,85 @@ export function ChatPanel() {
       // Connect to SSE stream
       const eventSource = new EventSource(`/api/runs/${runId}/events`);
 
+      // Listen for agent events (text, tool use, etc.)
       eventSource.addEventListener('agent', (event) => {
-        const agentEvent: AgentEvent = JSON.parse(event.data);
+        try {
+          const agentEvent: AgentEvent = JSON.parse(event.data);
 
-        setMessages((prev) => {
-          const newMessages = [...prev];
-          const lastMessage = newMessages[newMessages.length - 1];
-
-          if (lastMessage.role === 'assistant') {
-            lastMessage.events = [...(lastMessage.events || []), agentEvent];
-
-            // Update status based on event
-            if (agentEvent.type === 'turn_end') {
-              lastMessage.status = 'succeeded';
-            } else if (agentEvent.type === 'error') {
-              lastMessage.status = 'failed';
-            }
-          }
-
-          return newMessages;
-        });
-      });
-
-      eventSource.addEventListener('status', (event) => {
-        const { status } = JSON.parse(event.data);
-
-        setMessages((prev) => {
-          const newMessages = [...prev];
-          const lastMessage = newMessages[newMessages.length - 1];
-
-          if (lastMessage.role === 'assistant') {
-            lastMessage.status = status;
-          }
-
-          return newMessages;
-        });
-
-        if (status === 'succeeded' || status === 'failed' || status === 'canceled') {
-          eventSource.close();
-          setIsLoading(false);
+          // Update message with new event data
+          updateLastAssistantMessage((msg) => ({
+            ...msg,
+            events: [...(msg.events || []), agentEvent],
+            // Update status based on event type
+            status: agentEvent.type === 'turn_end'
+              ? 'succeeded'
+              : agentEvent.type === 'error'
+                ? 'failed'
+                : msg.status
+          }));
+        } catch (error) {
+          console.error('Failed to parse agent event:', error);
         }
       });
 
+      // Listen for status updates (running, succeeded, failed, canceled)
+      eventSource.addEventListener('status', (event) => {
+        try {
+          const { status } = JSON.parse(event.data);
+
+          updateLastAssistantMessage((msg) => ({
+            ...msg,
+            status
+          }));
+
+          // Close connection on terminal status
+          if (status === 'succeeded' || status === 'failed' || status === 'canceled') {
+            eventSource.close();
+            setIsLoading(false);
+          }
+        } catch (error) {
+          console.error('Failed to parse status event:', error);
+        }
+      });
+
+      // Handle connection errors
       eventSource.onerror = () => {
         eventSource.close();
         setIsLoading(false);
 
-        setMessages((prev) => {
-          const newMessages = [...prev];
-          const lastMessage = newMessages[newMessages.length - 1];
-
-          if (lastMessage.role === 'assistant' && lastMessage.status === 'running') {
-            lastMessage.status = 'failed';
-            lastMessage.events = [
-              ...(lastMessage.events || []),
-              { type: 'error', message: 'Connection lost' },
-            ];
+        updateLastAssistantMessage((msg) => {
+          if (msg.status === 'running') {
+            return {
+              ...msg,
+              status: 'failed',
+              events: [
+                ...(msg.events || []),
+                { type: 'error', message: 'Connection lost' } as AgentEvent,
+              ]
+            };
           }
-
-          return newMessages;
+          return msg;
         });
       };
+
+      // Store reference for cleanup
+      eventSourceRef.current = eventSource;
     } catch (error) {
       console.error('Chat error:', error);
       setIsLoading(false);
 
-      setMessages((prev) => {
-        const newMessages = [...prev];
-        const lastMessage = newMessages[newMessages.length - 1];
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-        if (lastMessage.role === 'assistant') {
-          lastMessage.status = 'failed';
-          lastMessage.events = [
-            ...(lastMessage.events || []),
-            { type: 'error', message: 'Failed to start chat' },
-          ];
-        }
-
-        return newMessages;
-      });
+      updateLastAssistantMessage((msg) => ({
+        ...msg,
+        status: 'failed',
+        events: [
+          ...(msg.events || []),
+          { type: 'error', message: `Failed to start chat: ${errorMessage}` } as AgentEvent,
+        ]
+      }));
     }
-  }, [input, isLoading]);
+  }, [input, isLoading, messageCounter, updateLastAssistantMessage]);
 
   return (
     <div className="flex flex-col h-screen bg-white dark:bg-gray-900">
