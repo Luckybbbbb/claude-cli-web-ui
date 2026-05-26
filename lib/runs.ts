@@ -23,7 +23,7 @@ export function getRun(id: string): RunState | undefined {
 export function addEvent(run: RunState, event: AgentEvent): void {
   run.events.push(event);
   // Broadcast to all connected SSE clients
-  for (const client of run.clients) {
+  for (const client of Array.from(run.clients)) {
     try {
       client.send('agent', event, run.events.length);
     } catch {
@@ -48,7 +48,7 @@ export function removeClient(run: RunState, client: SSEClient): void {
 export function setRunStatus(run: RunState, status: RunState['status']): void {
   run.status = status;
   // Notify all clients of status change
-  for (const client of run.clients) {
+  for (const client of Array.from(run.clients)) {
     try {
       client.send('status', { status }, run.events.length + 1);
       if (status === 'succeeded' || status === 'failed' || status === 'canceled') {
@@ -64,7 +64,7 @@ export function cleanupRun(id: string): void {
   const run = runs.get(id);
   if (run) {
     // Close all client connections
-    for (const client of run.clients) {
+    for (const client of Array.from(run.clients)) {
       try {
         client.close();
       } catch {
