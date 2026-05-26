@@ -17,6 +17,7 @@ export function ChatPanel() {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [messageCounter, setMessageCounter] = useState(0);
+  const [error, setError] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
 
   // Cleanup EventSource on unmount to prevent memory leaks
@@ -157,6 +158,7 @@ export function ChatPanel() {
       setIsLoading(false);
 
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      setError(errorMessage);
 
       updateLastAssistantMessage((msg) => ({
         ...msg,
@@ -172,6 +174,18 @@ export function ChatPanel() {
   return (
     <div className="flex flex-col h-screen bg-white dark:bg-gray-900">
       <MessageList messages={messages} />
+
+      {error && (
+        <div className="mb-4 p-4 bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300 rounded-lg mx-4">
+          {error}
+          <button
+            onClick={() => setError(null)}
+            className="ml-2 underline"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
 
       <form
         onSubmit={handleSubmit}

@@ -19,6 +19,24 @@ export async function POST(request: NextRequest) {
     }
 
     const config = getEnvConfig();
+
+    // Check if CLI exists
+    try {
+      const testProcess = spawn(config.claudeBin, ['--version']);
+      await new Promise((resolve, reject) => {
+        testProcess.on('close', (code) => {
+          if (code === 0) resolve(undefined);
+          else reject(new Error('CLI not found'));
+        });
+        testProcess.on('error', reject);
+      });
+    } catch {
+      return NextResponse.json(
+        { error: `Claude CLI not found at ${config.claudeBin}. Please install it or set CLAUDE_BIN environment variable.` },
+        { status: 500 }
+      );
+    }
+
     const runId = randomUUID();
     const run = createRun(runId);
     const workingDir = cwd || config.defaultCwd;
