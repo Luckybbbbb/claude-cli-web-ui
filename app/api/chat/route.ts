@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
-import { createRun, addEvent, setRunStatus } from '@/lib/runs';
+import { createRun, addEvent, setRunStatus, getRunCount } from '@/lib/runs';
 import { createClaudeStreamHandler } from '@/lib/claude-stream';
 import { getEnvConfig } from '@/lib/env';
 import { ChatRequest, ChatResponse } from '@/lib/types';
@@ -22,7 +22,7 @@ export async function POST(request: NextRequest) {
 
     // Check if CLI exists
     try {
-      const testProcess = spawn(config.claudeBin, ['--version']);
+      const testProcess = spawn(config.claudeBin, ['--version'], { shell: true });
       await new Promise((resolve, reject) => {
         testProcess.on('close', (code) => {
           if (code === 0) resolve(undefined);
@@ -30,7 +30,8 @@ export async function POST(request: NextRequest) {
         });
         testProcess.on('error', reject);
       });
-    } catch {
+    } catch (err) {
+      console.error('CLI detection failed:', err);
       return NextResponse.json(
         { error: `Claude CLI not found at ${config.claudeBin}. Please install it or set CLAUDE_BIN environment variable.` },
         { status: 500 }
@@ -39,23 +40,35 @@ export async function POST(request: NextRequest) {
 
     const runId = randomUUID();
     const run = createRun(runId);
+    console.log(`[chat] Created run ${runId}, total runs: ${getRunCount()}`);
     const workingDir = cwd || config.defaultCwd;
+    const effectiveModel = model || config.defaultModel;
 
     // Build Claude CLI arguments
+    // Note: --cwd is not a valid flag, use spawn's cwd option instead
+    // Prompt is passed as the last positional argument
     const args = [
       '--print',
+      '--verbose',
       '--output-format', 'stream-json',
-      '--cwd', workingDir,
+      '--model', effectiveModel,
     ];
 
-    if (model) {
-      args.push('--model', model);
-    }
+    // Add prompt as positional argument (required for --print mode)
+    args.push(message);
+
+    // Resolve working directory to absolute path
+    const resolvedCwd = workingDir.startsWith('.')
+      ? require('path').resolve(process.cwd(), workingDir)
+      : workingDir;
+
+    console.log(`[chat] Spawning claude with args: ${JSON.stringify(args)}, cwd: ${resolvedCwd}`);
 
     // Spawn Claude CLI process
     const child = spawn(config.claudeBin, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      shell: false,
+      shell: true,  // Required on Windows for npm global commands (.cmd files)
+      cwd: resolvedCwd,
     });
 
     run.child = child;
@@ -89,22 +102,13 @@ export async function POST(request: NextRequest) {
     });
 
     child.on('error', (err: Error) => {
+      console.error(`[chat] Child process error: ${err.message}`);
       addEvent(run, { type: 'error', message: err.message });
       setRunStatus(run, 'failed');
     });
 
-    // Write prompt to stdin
-    if (child.stdin) {
-      const userMessage = JSON.stringify({
-        type: 'user',
-        message: {
-          role: 'user',
-          content: [{ type: 'text', text: message }],
-        },
-      });
-      child.stdin.write(`${userMessage}\n`, 'utf8');
-      run.stdinOpen = true;
-    }
+    // In --print mode, prompt is passed as argument, no stdin needed
+    run.stdinOpen = false;
 
     const response: ChatResponse = { runId };
     return NextResponse.json(response);

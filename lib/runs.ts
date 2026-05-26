@@ -1,6 +1,15 @@
-import { RunState, SSEClient, AgentEvent } from './types';
+import { RunState } from './types';
 
-const runs = new Map<string, RunState>();
+// Use globalThis to persist across Next.js module reloads in development
+const globalForRuns = globalThis as unknown as {
+  runs: Map<string, RunState> | undefined;
+};
+
+if (!globalForRuns.runs) {
+  globalForRuns.runs = new Map<string, RunState>();
+}
+
+const runs = globalForRuns.runs;
 
 export function createRun(id: string): RunState {
   const run: RunState = {
@@ -20,34 +29,34 @@ export function getRun(id: string): RunState | undefined {
   return runs.get(id);
 }
 
-export function addEvent(run: RunState, event: AgentEvent): void {
+export function getRunCount(): number {
+  return runs.size;
+}
+
+export function addEvent(run: RunState, event: import('./types').AgentEvent): void {
   run.events.push(event);
-  // Broadcast to all connected SSE clients
   for (const client of Array.from(run.clients)) {
     try {
       client.send('agent', event, run.events.length);
     } catch {
-      // Client disconnected, remove it
       run.clients.delete(client);
     }
   }
 }
 
-export function addClient(run: RunState, client: SSEClient): void {
+export function addClient(run: RunState, client: import('./types').SSEClient): void {
   run.clients.add(client);
-  // Send existing events to new client
   run.events.forEach((event, index) => {
     client.send('agent', event, index + 1);
   });
 }
 
-export function removeClient(run: RunState, client: SSEClient): void {
+export function removeClient(run: RunState, client: import('./types').SSEClient): void {
   run.clients.delete(client);
 }
 
 export function setRunStatus(run: RunState, status: RunState['status']): void {
   run.status = status;
-  // Notify all clients of status change
   for (const client of Array.from(run.clients)) {
     try {
       client.send('status', { status }, run.events.length + 1);
@@ -63,7 +72,6 @@ export function setRunStatus(run: RunState, status: RunState['status']): void {
 export function cleanupRun(id: string): void {
   const run = runs.get(id);
   if (run) {
-    // Close all client connections
     for (const client of Array.from(run.clients)) {
       try {
         client.close();
@@ -71,7 +79,6 @@ export function cleanupRun(id: string): void {
         // Ignore errors during cleanup
       }
     }
-    // Kill child process if still running
     if (run.child && !run.child.killed) {
       run.child.kill('SIGTERM');
     }

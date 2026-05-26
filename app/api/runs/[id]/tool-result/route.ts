@@ -3,10 +3,10 @@ import { getRun } from '@/lib/runs';
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const runId = params.id;
+    const { id: runId } = await params;
     const run = getRun(runId);
 
     if (!run) {

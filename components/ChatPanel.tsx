@@ -87,72 +87,66 @@ export function ChatPanel() {
 
       const { runId }: ChatResponse = await response.json();
 
-      // Connect to SSE stream
-      const eventSource = new EventSource(`/api/runs/${runId}/events`);
+      // Use fetch to read SSE stream (more reliable than EventSource)
+      const sseResponse = await fetch(`/api/runs/${runId}/events`);
+      const reader = sseResponse.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-      // Listen for agent events (text, tool use, etc.)
-      eventSource.addEventListener('agent', (event) => {
+      const processStream = async () => {
         try {
-          const agentEvent: AgentEvent = JSON.parse(event.data);
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
 
-          // Update message with new event data
-          updateLastAssistantMessage((msg) => ({
-            ...msg,
-            events: [...(msg.events || []), agentEvent],
-            // Update status based on event type
-            status: agentEvent.type === 'turn_end'
-              ? 'succeeded'
-              : agentEvent.type === 'error'
-                ? 'failed'
-                : msg.status
-          }));
-        } catch (error) {
-          console.error('Failed to parse agent event:', error);
-        }
-      });
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
 
-      // Listen for status updates (running, succeeded, failed, canceled)
-      eventSource.addEventListener('status', (event) => {
-        try {
-          const { status } = JSON.parse(event.data);
+            let currentEvent = '';
+            for (const line of lines) {
+              if (line.startsWith('event:')) {
+                currentEvent = line.substring(6).trim();
+              } else if (line.startsWith('data:')) {
+                try {
+                  const data = JSON.parse(line.substring(5).trim());
 
-          updateLastAssistantMessage((msg) => ({
-            ...msg,
-            status
-          }));
+                  if (currentEvent === 'agent') {
+                    updateLastAssistantMessage((msg) => ({
+                      ...msg,
+                      events: [...(msg.events || []), data],
+                      status: data.type === 'turn_end'
+                        ? 'succeeded'
+                        : data.type === 'error'
+                          ? 'failed'
+                          : msg.status
+                    }));
+                  } else if (currentEvent === 'status') {
+                    updateLastAssistantMessage((msg) => ({
+                      ...msg,
+                      status: data.status
+                    }));
 
-          // Close connection on terminal status
-          if (status === 'succeeded' || status === 'failed' || status === 'canceled') {
-            eventSource.close();
-            setIsLoading(false);
+                    if (data.status === 'succeeded' || data.status === 'failed' || data.status === 'canceled') {
+                      reader.cancel();
+                      setIsLoading(false);
+                      return;
+                    }
+                  }
+                } catch (e) {
+                  console.error('Failed to parse SSE data:', e);
+                }
+              }
+            }
           }
         } catch (error) {
-          console.error('Failed to parse status event:', error);
+          console.error('SSE stream error:', error);
+        } finally {
+          setIsLoading(false);
         }
-      });
-
-      // Handle connection errors
-      eventSource.onerror = () => {
-        eventSource.close();
-        setIsLoading(false);
-
-        updateLastAssistantMessage((msg) => {
-          if (msg.status === 'running') {
-            return {
-              ...msg,
-              status: 'failed',
-              events: [
-                ...(msg.events || []),
-                { type: 'error', message: 'Connection lost' } as AgentEvent,
-              ]
-            };
-          }
-          return msg;
-        });
       };
 
-      // Store reference for cleanup
-      eventSourceRef.current = eventSource;
+      processStream();
     } catch (error) {
       console.error('Chat error:', error);
       setIsLoading(false);

@@ -3,9 +3,9 @@ import { getRun, setRunStatus } from '@/lib/runs';
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
-  const runId = params.id;
+  const { id: runId } = await params;
   const run = getRun(runId);
 
   if (!run) {
