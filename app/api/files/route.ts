@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readdirSync, statSync } from 'fs';
-import { join, relative } from 'path';
+import { readdirSync } from 'fs';
+import { join, relative, normalize, sep } from 'path';
 import { getEnvConfig } from '@/lib/env';
 
 interface FileEntry {
@@ -12,53 +12,39 @@ const IGNORED_DIRS = new Set(['node_modules', '.git', '.next', '.superpowers']);
 
 export async function GET(request: NextRequest) {
   const { searchParams } = request.nextUrl;
-  const prefix = searchParams.get('prefix') || '';
-  const limit = Math.min(Math.max(parseInt(searchParams.get('limit') || '20', 10), 1), 100);
+  const dir = searchParams.get('dir') || '';
 
   const cwdParam = searchParams.get('cwd');
   const config = getEnvConfig();
   const rootDir = (cwdParam && cwdParam.length > 0) ? cwdParam : config.defaultCwd;
 
-  const files: FileEntry[] = [];
-
-  function scanDir(dir: string) {
-    if (files.length >= limit) return;
-
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-
-    for (const entry of entries) {
-      if (files.length >= limit) break;
-
-      const fullPath = join(dir, entry.name);
-      const relativePath = relative(rootDir, fullPath);
-
-      if (entry.isDirectory()) {
-        if (IGNORED_DIRS.has(entry.name)) continue;
-
-        // Include directory if its relative path starts with prefix
-        if (relativePath.startsWith(prefix) || prefix === '') {
-          files.push({ path: relativePath, type: 'directory' });
-        }
-
-        // Continue scanning if directory path could contain matching entries
-        if (relativePath.startsWith(prefix) || prefix.startsWith(relativePath) || prefix === '') {
-          scanDir(fullPath);
-        }
-      } else if (entry.isFile()) {
-        if (relativePath.startsWith(prefix) || prefix === '') {
-          files.push({ path: relativePath, type: 'file' });
-        }
-      }
-    }
+  // Path traversal prevention: reject if dir contains '..'
+  if (dir.includes('..')) {
+    return NextResponse.json(
+      { error: 'Invalid directory path' },
+      { status: 400 }
+    );
   }
 
+  const targetDir = dir ? join(rootDir, dir) : rootDir;
+
+  const files: FileEntry[] = [];
+
   try {
-    scanDir(rootDir);
+    const entries = readdirSync(targetDir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (IGNORED_DIRS.has(entry.name)) continue;
+        const fullPath = join(targetDir, entry.name);
+        const relativePath = relative(rootDir, fullPath);
+        files.push({ path: relativePath, type: 'directory' });
+      } else if (entry.isFile()) {
+        const fullPath = join(targetDir, entry.name);
+        const relativePath = relative(rootDir, fullPath);
+        files.push({ path: relativePath, type: 'file' });
+      }
+    }
   } catch (err) {
     console.error('[files] Error scanning directory:', err);
     return NextResponse.json(
@@ -67,7 +53,13 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  files.sort((a, b) => a.path.localeCompare(b.path));
+  // Sort: directories first (by name), then files (by name)
+  files.sort((a, b) => {
+    if (a.type !== b.type) {
+      return a.type === 'directory' ? -1 : 1;
+    }
+    return a.path.localeCompare(b.path);
+  });
 
-  return NextResponse.json({ files: files.slice(0, limit) });
+  return NextResponse.json({ files });
 }

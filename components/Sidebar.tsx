@@ -230,6 +230,7 @@ export function Sidebar({
                   {projectSessions.map((session) => {
                     const isCurrentSession = session.id === selectedSessionId;
                     const isSessionHovered = session.id === hoveredSessionId;
+                    const isRunning = session.status === 'running';
 
                     return (
                       <div
@@ -238,47 +239,83 @@ export function Sidebar({
                         style={{
                           padding: '8px 12px',
                           fontSize: '12px',
-                          backgroundColor: isCurrentSession
-                            ? 'color-mix(in srgb, #6495ed 12%, transparent)'
-                            : isSessionHovered
-                              ? 'color-mix(in srgb, var(--accent) 4%, transparent)'
-                              : 'transparent',
+                          backgroundColor: isRunning
+                            ? 'rgba(34,197,94,0.06)'
+                            : isCurrentSession
+                              ? 'color-mix(in srgb, #6495ed 12%, transparent)'
+                              : isSessionHovered
+                                ? 'color-mix(in srgb, var(--accent) 4%, transparent)'
+                                : 'transparent',
                         }}
                         onClick={() => onSelectSession(session.id)}
                         onMouseEnter={() => setHoveredSessionId(session.id)}
                         onMouseLeave={() => setHoveredSessionId(null)}
                       >
                         {/* Session dot indicator */}
-                        <span
-                          className="shrink-0 text-[10px] leading-none"
-                          style={{
-                            color: isCurrentSession ? '#6495ed' : 'var(--text-secondary)',
-                            opacity: isCurrentSession ? 1 : 0.5,
-                          }}
-                        >
-                          {isCurrentSession ? '●' : '○'}
-                        </span>
+                        {isRunning ? (
+                          <span
+                            className="shrink-0"
+                            style={{
+                              width: '6px',
+                              height: '6px',
+                              borderRadius: '50%',
+                              background: '#22c55e',
+                              animation: 'pulse 2s infinite',
+                              display: 'inline-block',
+                            }}
+                          />
+                        ) : (
+                          <span
+                            className="shrink-0 text-[10px] leading-none"
+                            style={{
+                              color: isCurrentSession ? '#6495ed' : 'var(--text-secondary)',
+                              opacity: isCurrentSession ? 1 : 0.5,
+                            }}
+                          >
+                            {isCurrentSession ? '●' : '○'}
+                          </span>
+                        )}
 
-                        {/* Session title + time */}
+                        {/* Session title + running tag + time */}
                         <div className="flex-1 min-w-0 flex items-center gap-1.5">
                           <span
                             className="truncate"
                             style={{
-                              color: isCurrentSession ? 'var(--text-primary)' : 'var(--text-secondary)',
+                              color: isRunning
+                                ? '#22c55e'
+                                : isCurrentSession
+                                  ? 'var(--text-primary)'
+                                  : 'var(--text-secondary)',
                               fontWeight: isCurrentSession ? 500 : 400,
                             }}
                           >
                             {session.title}
                           </span>
-                          <span
-                            className="shrink-0 text-[11px]"
-                            style={{
-                              color: 'var(--text-secondary)',
-                              opacity: 0.6,
-                            }}
-                          >
-                            {relativeTime(session.updatedAt)}
-                          </span>
+                          {isRunning && (
+                            <span
+                              className="shrink-0"
+                              style={{
+                                fontSize: '10px',
+                                color: '#22c55e',
+                                background: 'rgba(34,197,94,0.15)',
+                                padding: '1px 6px',
+                                borderRadius: '4px',
+                              }}
+                            >
+                              运行中
+                            </span>
+                          )}
+                          {!isRunning && (
+                            <span
+                              className="shrink-0 text-[11px]"
+                              style={{
+                                color: 'var(--text-secondary)',
+                                opacity: 0.6,
+                              }}
+                            >
+                              {relativeTime(session.updatedAt)}
+                            </span>
+                          )}
                         </div>
 
                         {/* Delete button (visible on hover) */}

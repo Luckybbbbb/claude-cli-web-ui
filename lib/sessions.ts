@@ -32,6 +32,7 @@ export interface SessionMeta {
   createdAt: string;
   updatedAt: string;
   messageCount: number;
+  status?: 'running' | 'idle';  // 前端状态，不需要持久化
 }
 
 // ---------------------------------------------------------------------------

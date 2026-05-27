@@ -1,14 +1,43 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
-import { readFileSync, statSync } from 'fs';
-import { join, isAbsolute } from 'path';
+import { readFileSync, statSync, readdirSync } from 'fs';
+import { join, isAbsolute, relative } from 'path';
 import { createRun, addEvent, setRunStatus, getRunCount } from '@/lib/runs';
 import { createClaudeStreamHandler } from '@/lib/claude-stream';
 import { getEnvConfig } from '@/lib/env';
 import { ChatRequest, ChatResponse } from '@/lib/types';
 
 const MAX_FILE_SIZE = 50 * 1024; // 50KB
+const MAX_TOTAL_DIR_SIZE = 200 * 1024; // 200KB
+const MAX_DIR_DEPTH = 5;
+const IGNORED_DIRS = new Set(['node_modules', '.git', '.next', '.superpowers']);
+
+/**
+ * Recursively collect all file paths under a directory.
+ */
+function scanDirectoryFiles(dirPath: string, rootDir: string, depth = 0): string[] {
+  if (depth > MAX_DIR_DEPTH) return [];
+
+  let entries;
+  try {
+    entries = readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const files: string[] = [];
+  for (const entry of entries) {
+    const fullPath = join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      if (IGNORED_DIRS.has(entry.name)) continue;
+      files.push(...scanDirectoryFiles(fullPath, rootDir, depth + 1));
+    } else if (entry.isFile()) {
+      files.push(fullPath);
+    }
+  }
+  return files;
+}
 
 /**
  * Parse @file and @url references in message and append their content.
@@ -39,11 +68,53 @@ async function resolveReferences(message: string, workingDir: string): Promise<s
     try {
       const filePath = isAbsolute(ref.path) ? ref.path : join(workingDir, ref.path);
       const stat = statSync(filePath);
-      let content = readFileSync(filePath, 'utf-8');
-      if (stat.size > MAX_FILE_SIZE) {
-        content = content.slice(0, MAX_FILE_SIZE) + '\n[truncated - file exceeds 50KB]';
+
+      if (stat.isDirectory()) {
+        // Directory reference: recursively collect and read files
+        const allFiles = scanDirectoryFiles(filePath, filePath);
+        let totalSize = 0;
+
+        for (let i = 0; i < allFiles.length; i++) {
+          const absPath = allFiles[i];
+          try {
+            const fileStat = statSync(absPath);
+            if (fileStat.size > MAX_FILE_SIZE) continue; // skip oversized individual files
+            const relPath = relative(workingDir, absPath);
+            let content = readFileSync(absPath, 'utf-8');
+            totalSize += content.length;
+
+            if (totalSize > MAX_TOTAL_DIR_SIZE) {
+              // Truncate the current file to fit within the budget
+              const budget = MAX_TOTAL_DIR_SIZE - (totalSize - content.length);
+              if (budget > 0) {
+                content = content.slice(0, budget) + '\n[truncated - total directory content exceeds 200KB]';
+              } else {
+                content = '[skipped - total directory content exceeds 200KB]';
+              }
+              appended += `<file path="${relPath}">\n${content}\n</file>\n\n`;
+
+              // Count remaining files (including oversized ones that were skipped)
+              const omitted = allFiles.length - i - 1;
+              if (omitted > 0) {
+                appended += `[${omitted} more file(s) omitted - total directory content exceeds 200KB]\n\n`;
+              }
+              break;
+            }
+
+            appended += `<file path="${relPath}">\n${content}\n</file>\n\n`;
+          } catch (err) {
+            // Skip individual unreadable files silently
+            console.error(`[chat] @file dir scan error for ${absPath}:`, err);
+          }
+        }
+      } else {
+        // Single file reference (existing logic)
+        let content = readFileSync(filePath, 'utf-8');
+        if (stat.size > MAX_FILE_SIZE) {
+          content = content.slice(0, MAX_FILE_SIZE) + '\n[truncated - file exceeds 50KB]';
+        }
+        appended += `<file path="${ref.path}">\n${content}\n</file>\n\n`;
       }
-      appended += `<file path="${ref.path}">\n${content}\n</file>\n\n`;
     } catch (err) {
       appended += `<file path="${ref.path}">\n[Error: file not found or unreadable]\n</file>\n\n`;
       console.error(`[chat] @file error for ${ref.path}:`, err);

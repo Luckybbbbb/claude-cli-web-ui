@@ -82,7 +82,7 @@ interface TreeNode {
 2. 点击文件夹（左侧行）→ 展开并请求 `GET /api/files?dir=src/components&cwd=...` → 展示子节点
 3. 再次点击已展开的文件夹 → 折叠
 4. 点击文件 → 插入 `@file path` 到输入框
-5. 文件夹右侧显示"选择"按钮（或右键）→ 点击后插入 `@file path`（目录路径）
+5. 文件夹行 hover 时右侧显示「选择」文字按钮 → 点击后插入 `@file path`（目录路径）
 6. 键盘导航：上下箭头选择、Enter 展开/选中、Escape 关闭
 
 **UI 样式**:

@@ -2,19 +2,53 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Design System: Kimi-inspired Chat UI ── */
+
 :root {
-  --foreground-rgb: 0, 0, 0;
+  /* Backgrounds — pure white + neutral grays */
+  --bg-primary: #ffffff;
+  --bg-secondary: #f5f5f5;
+  --bg-user-bubble: #1a1a1a;
+  --bg-assistant-bubble: #f5f5f5;
+
+  /* Text */
+  --text-primary: #1a1a1a;
+  --text-secondary: #999999;
+
+  /* Borders & Accent — muted, not loud */
+  --border: #e8e8e8;
+  --accent: #1a1a1a;
+
+  /* Foreground / background for legacy compatibility */
+  --foreground-rgb: 26, 26, 26;
   --background-start-rgb: 255, 255, 255;
-  --background-end-rgb: 255, 255, 255;
+  --background-end-rgb: 245, 245, 245;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --foreground-rgb: 255, 255, 255;
-    --background-start-rgb: 10, 10, 10;
-    --background-end-rgb: 20, 20, 20;
+    /* Backgrounds — true dark, not tinted */
+    --bg-primary: #0d0d0d;
+    --bg-secondary: #1a1a1a;
+    --bg-user-bubble: #333333;
+    --bg-assistant-bubble: #1a1a1a;
+
+    /* Text */
+    --text-primary: #e8e8e8;
+    --text-secondary: #888888;
+
+    /* Borders & Accent */
+    --border: #2a2a2a;
+    --accent: #cccccc;
+
+    /* Foreground / background for legacy compatibility */
+    --foreground-rgb: 232, 232, 232;
+    --background-start-rgb: 13, 13, 13;
+    --background-end-rgb: 26, 26, 26;
   }
 }
+
+/* ── Base Styles ── */
 
 body {
   color: rgb(var(--foreground-rgb));
@@ -25,6 +59,87 @@ body {
     )
     rgb(var(--background-start-rgb));
 }
+
+/* ── Animation Keyframes ── */
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slideUp {
+  from {
+    transform: translateY(10px);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@keyframes messageAppear {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse {
+  0% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+/* ── Utility Classes ── */
+
+.animate-message-appear {
+  animation: messageAppear 200ms ease-out both;
+}
+
+.rounded-bubble {
+  border-radius: 16px;
+}
+
+.card-shadow {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.input-focus-ring {
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.input-focus-ring:focus {
+  border-color: #999999;
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.06);
+}
+
+@media (prefers-color-scheme: dark) {
+  .input-focus-ring:focus {
+    border-color: #666666;
+    box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.06);
+  }
+}
+
+/* ── Command Palette (cmdk) Selected/Hover States ── */
+
+[cmdk-list] [cmdk-item][aria-selected="true"] {
+  background-color: var(--bg-secondary);
+}
+
+/* ── Markdown Styles ── */
 
 .markdown-body {
   @apply prose dark:prose-invert max-w-none;
@@ -40,4 +155,26 @@ body {
 
 .markdown-body pre code {
   @apply bg-transparent p-0;
+}
+
+/* ── Safe Area Utilities for Mobile Devices ── */
+
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.input-bar-safe {
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), 0.5rem);
+}
+
+/* ── Sidebar transition ── */
+
+.sidebar-panel {
+  transition: width 200ms ease-in-out, opacity 150ms ease-in-out;
+}
+
+.sidebar-panel.sidebar-collapsed {
+  width: 0 !important;
+  opacity: 0;
+  pointer-events: none;
 }

@@ -110,12 +110,12 @@ export function AssistantMessage({ events }: AssistantMessageProps) {
   }
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-3">
       {blocks.map((block, index) => {
         switch (block.type) {
           case 'text':
             return (
-              <div key={index} className="markdown-body">
+              <div key={index} className="markdown-body text-sm leading-relaxed" style={{ color: 'var(--text-primary)' }}>
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
                   {block.content || ''}
                 </ReactMarkdown>

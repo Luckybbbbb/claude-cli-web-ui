@@ -31,6 +31,23 @@ interface Message {
   status?: string;
 }
 
+interface StreamContext {
+  isBackground: boolean;
+  activeSessionId: string;
+  selectedProjectId: string | null;
+}
+
+interface BackgroundRun {
+  sessionId: string;
+  projectId: string;
+  runId: string;
+  reader: ReadableStreamDefaultReader;
+  messages: Message[];
+  claudeSessionId: string | null;
+  abortController: AbortController;
+  streamContext: StreamContext;
+}
+
 export function ChatPanel() {
   // ── Chat state ──
   const [messages, setMessages] = useState<Message[]>([]);
@@ -66,6 +83,12 @@ export function ChatPanel() {
   const readerRef = useRef<ReadableStreamDefaultReader | null>(null);
   const projectsLoadedRef = useRef(false);
   const messagesRef = useRef<Message[]>([]);
+  const currentRunIdRef = useRef<string | null>(null);
+  const streamContextRef = useRef<StreamContext | null>(null);
+
+  // ── Background runs ──
+  const backgroundRunsRef = useRef<Map<string, BackgroundRun>>(new Map());
+  const [bgVersion, setBgVersion] = useState(0);
 
   // ── Derived: selected project ──
   const selectedProject = projects.find((p) => p.id === selectedProjectId) || null;
@@ -194,8 +217,26 @@ export function ChatPanel() {
       if (readerRef.current) {
         readerRef.current.cancel().catch(() => {});
       }
+      // Cancel all background runs on unmount
+      backgroundRunsRef.current.forEach((bgRun) => {
+        bgRun.reader.cancel().catch(() => {});
+        bgRun.abortController.abort();
+      });
+      backgroundRunsRef.current.clear();
     };
   }, []);
+
+  // ── Sync background run status to sessions list ──
+  useEffect(() => {
+    // bgVersion is the trigger — reading it ensures this effect re-runs
+    const version = bgVersion;
+    void version;
+
+    setSessions(prev => prev.map(s => {
+      const isRunning = backgroundRunsRef.current.has(s.id);
+      return { ...s, status: isRunning ? 'running' as const : 'idle' as const };
+    }));
+  }, [bgVersion]);
 
   // Helper to update the last assistant message immutably
   const updateLastAssistantMessage = useCallback((updater: (msg: Message) => Message) => {
@@ -210,6 +251,17 @@ export function ChatPanel() {
 
       return newMessages;
     });
+  }, []);
+
+  // Helper to update a background run's last assistant message
+  const updateBgMessage = useCallback((sessionId: string, updater: (msg: Message) => Message) => {
+    const bgRun = backgroundRunsRef.current.get(sessionId);
+    if (!bgRun) return;
+    const msgs = bgRun.messages;
+    const lastIndex = msgs.length - 1;
+    if (lastIndex >= 0 && msgs[lastIndex].role === 'assistant') {
+      bgRun.messages = msgs.map((m, i) => i === lastIndex ? updater(m) : m);
+    }
   }, []);
 
   // ── Cancel any running SSE stream ──
@@ -235,10 +287,35 @@ export function ChatPanel() {
 
   const handleSelectProject = useCallback((id: string) => {
     if (id === selectedProjectId) return;
-    resetConversation();
+
+    // Move current running process to background if active
+    if (readerRef.current && selectedSessionId) {
+      const streamCtx = streamContextRef.current;
+      if (streamCtx) {
+        streamCtx.isBackground = true;
+      }
+      backgroundRunsRef.current.set(selectedSessionId, {
+        sessionId: selectedSessionId,
+        projectId: selectedProjectId!,
+        runId: currentRunIdRef.current || '',
+        reader: readerRef.current,
+        messages: [...messagesRef.current],
+        claudeSessionId,
+        abortController: new AbortController(),
+        streamContext: streamCtx!,
+      });
+      readerRef.current = null;
+      currentRunIdRef.current = null;
+      setBgVersion(v => v + 1);
+    } else {
+      cancelStream();
+    }
+
+    setMessages([]);
+    setIsLoading(false);
     setSelectedProjectId(id);
     localStorage.setItem('selectedProjectId', id);
-  }, [selectedProjectId, resetConversation]);
+  }, [selectedProjectId, selectedSessionId, claudeSessionId, cancelStream]);
 
   const handleAddProject = useCallback(() => {
     setEditingProject(undefined);
@@ -253,6 +330,21 @@ export function ChatPanel() {
 
   const handleDeleteProject = useCallback(async (id: string) => {
     try {
+      // Clean up all background runs for this project
+      const entriesToDelete: string[] = [];
+      backgroundRunsRef.current.forEach((bgRun, sessionId) => {
+        if (bgRun.projectId === id) {
+          bgRun.reader.cancel().catch(() => {});
+          bgRun.abortController.abort();
+          if (bgRun.runId) {
+            fetch(`/api/runs/${bgRun.runId}/cancel`, { method: 'POST' }).catch(() => {});
+          }
+          entriesToDelete.push(sessionId);
+        }
+      });
+      entriesToDelete.forEach(sid => backgroundRunsRef.current.delete(sid));
+      setBgVersion(v => v + 1);
+
       const res = await fetch('/api/projects', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
@@ -363,6 +455,29 @@ export function ChatPanel() {
 
   const handleSelectSession = useCallback(async (sessionId: string) => {
     if (sessionId === selectedSessionId) return;
+
+    // Check if this session has a background run -> restore to foreground
+    const bgRun = backgroundRunsRef.current.get(sessionId);
+    if (bgRun) {
+      // Cancel current foreground stream if any
+      if (readerRef.current) {
+        readerRef.current.cancel().catch(() => {});
+      }
+      // Restore background run to foreground
+      backgroundRunsRef.current.delete(sessionId);
+      bgRun.streamContext.isBackground = false;
+      setSelectedSessionId(sessionId);
+      setClaudeSessionId(bgRun.claudeSessionId);
+      setMessages(bgRun.messages);
+      readerRef.current = bgRun.reader;
+      currentRunIdRef.current = bgRun.runId;
+      streamContextRef.current = bgRun.streamContext;
+      setIsLoading(true);
+      setBgVersion(v => v + 1);
+      return;
+    }
+
+    // Normal session load (existing logic)
     cancelStream();
     try {
       const res = await fetch(`/api/sessions/${sessionId}`);
@@ -378,6 +493,18 @@ export function ChatPanel() {
   }, [selectedSessionId, cancelStream]);
 
   const handleDeleteSession = useCallback(async (sessionId: string) => {
+    // Clean up background run if exists
+    const bgRun = backgroundRunsRef.current.get(sessionId);
+    if (bgRun) {
+      bgRun.reader.cancel().catch(() => {});
+      bgRun.abortController.abort();
+      if (bgRun.runId) {
+        fetch(`/api/runs/${bgRun.runId}/cancel`, { method: 'POST' }).catch(() => {});
+      }
+      backgroundRunsRef.current.delete(sessionId);
+      setBgVersion(v => v + 1);
+    }
+
     try {
       const res = await fetch('/api/sessions', {
         method: 'DELETE',
@@ -409,6 +536,31 @@ export function ChatPanel() {
     e.preventDefault();
 
     if (!input.trim() || isLoading) return;
+
+    // Auto-create session if none selected but project exists
+    let activeSessionId = selectedSessionId;
+    if (!activeSessionId && selectedProjectId) {
+      try {
+        const res = await fetch('/api/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ projectId: selectedProjectId }),
+        });
+        if (res.ok) {
+          const { session } = await res.json();
+          activeSessionId = session.id;
+          setSelectedSessionId(session.id);
+          // Refresh sessions list
+          const listRes = await fetch(`/api/sessions?projectId=${selectedProjectId}`);
+          if (listRes.ok) {
+            const listData = await listRes.json();
+            setSessions(listData.sessions || []);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to auto-create session:', err);
+      }
+    }
 
     // Generate unique IDs using counter to avoid Date.now() collisions
     const userMessageId = `user-${messageCounter}`;
@@ -461,6 +613,15 @@ export function ChatPanel() {
 
       const { runId }: ChatResponse = await response.json();
 
+      // Track current run and stream context for background run support
+      currentRunIdRef.current = runId;
+      const streamContext: StreamContext = {
+        isBackground: false,
+        activeSessionId: activeSessionId!,
+        selectedProjectId,
+      };
+      streamContextRef.current = streamContext;
+
       // Use fetch to read SSE stream (more reliable than EventSource)
       const sseResponse = await fetch(`/api/runs/${runId}/events`);
       const reader = sseResponse.body!.getReader();
@@ -487,7 +648,7 @@ export function ChatPanel() {
                   const data = JSON.parse(line.substring(5).trim());
 
                   if (currentEvent === 'agent') {
-                    updateLastAssistantMessage((msg) => ({
+                    const agentUpdater = (msg: Message) => ({
                       ...msg,
                       events: [...(msg.events || []), data],
                       status: data.type === 'turn_end'
@@ -495,28 +656,42 @@ export function ChatPanel() {
                         : data.type === 'error'
                           ? 'failed'
                           : msg.status
-                    }));
+                    });
+
+                    if (streamContext.isBackground && streamContext.activeSessionId) {
+                      updateBgMessage(streamContext.activeSessionId, agentUpdater);
+                    } else {
+                      updateLastAssistantMessage(agentUpdater);
+                    }
                     // Capture Claude session ID from agent events
                     if (data.sessionId) {
                       setClaudeSessionId(data.sessionId);
-                      if (selectedSessionId) {
+                      if (activeSessionId) {
                         fetch('/api/sessions', {
                           method: 'PUT',
                           headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ id: selectedSessionId, claudeSessionId: data.sessionId }),
+                          body: JSON.stringify({ id: activeSessionId, claudeSessionId: data.sessionId }),
                         }).catch(() => {});
                       }
                     }
                   } else if (currentEvent === 'status') {
-                    updateLastAssistantMessage((msg) => ({
+                    const statusUpdater = (msg: Message) => ({
                       ...msg,
                       status: data.status
-                    }));
+                    });
+
+                    if (streamContext.isBackground && streamContext.activeSessionId) {
+                      updateBgMessage(streamContext.activeSessionId, statusUpdater);
+                    } else {
+                      updateLastAssistantMessage(statusUpdater);
+                    }
 
                     if (data.status === 'succeeded' || data.status === 'failed' || data.status === 'canceled') {
                       reader.cancel();
-                      readerRef.current = null;
-                      setIsLoading(false);
+                      if (!streamContext.isBackground) {
+                        readerRef.current = null;
+                        setIsLoading(false);
+                      }
                       return;
                     }
                   }
@@ -528,27 +703,48 @@ export function ChatPanel() {
           }
         } catch (error) {
           console.error('SSE stream error:', error);
-          setConnected(false);
+          if (!streamContext.isBackground) {
+            setConnected(false);
+          }
         } finally {
-          readerRef.current = null;
-          setIsLoading(false);
-          // Persist session after stream ends
-          if (selectedSessionId) {
-            const currentMsgs = messagesRef.current;
-            const title = currentMsgs.length > 0 && currentMsgs[0].role === 'user'
-              ? currentMsgs[0].content.slice(0, 50)
-              : undefined;
-            fetch('/api/sessions', {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ id: selectedSessionId, messages: currentMsgs, title }),
-            }).catch(() => {});
-            // Refresh session list
-            if (selectedProjectId) {
-              fetch(`/api/sessions?projectId=${selectedProjectId}`)
-                .then(r => r.ok ? r.json() : { sessions: [] })
-                .then(d => setSessions(d.sessions || []))
-                .catch(() => {});
+          if (streamContext.isBackground) {
+            // Background mode: persist from background run messages
+            const bgRun = backgroundRunsRef.current.get(streamContext.activeSessionId);
+            if (bgRun) {
+              const msgs = bgRun.messages;
+              const title = msgs.length > 0 && msgs[0].role === 'user'
+                ? msgs[0].content.slice(0, 50)
+                : undefined;
+              fetch('/api/sessions', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: streamContext.activeSessionId, messages: msgs, title }),
+              }).catch(() => {});
+              // Remove from background runs
+              backgroundRunsRef.current.delete(streamContext.activeSessionId);
+              setBgVersion(v => v + 1);
+            }
+          } else {
+            // Foreground mode: existing logic
+            readerRef.current = null;
+            setIsLoading(false);
+            if (activeSessionId) {
+              const currentMsgs = messagesRef.current;
+              const title = currentMsgs.length > 0 && currentMsgs[0].role === 'user'
+                ? currentMsgs[0].content.slice(0, 50)
+                : undefined;
+              fetch('/api/sessions', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: activeSessionId, messages: currentMsgs, title }),
+              }).catch(() => {});
+              // Refresh session list
+              if (selectedProjectId) {
+                fetch(`/api/sessions?projectId=${selectedProjectId}`)
+                  .then(r => r.ok ? r.json() : { sessions: [] })
+                  .then(d => setSessions(d.sessions || []))
+                  .catch(() => {});
+              }
             }
           }
         }
@@ -572,7 +768,7 @@ export function ChatPanel() {
         ]
       }));
     }
-  }, [input, isLoading, messageCounter, updateLastAssistantMessage, selectedProject, selectedSessionId, selectedProjectId, claudeSessionId]);
+  }, [input, isLoading, messageCounter, updateLastAssistantMessage, updateBgMessage, selectedProject, selectedSessionId, selectedProjectId, claudeSessionId]);
 
   // Quick action handler: fill input with preset prompt
   const handleQuickAction = useCallback((prompt: string) => {
