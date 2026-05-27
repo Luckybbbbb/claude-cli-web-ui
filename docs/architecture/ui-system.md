@@ -62,14 +62,24 @@
 - `isLoading: boolean` — 是否正在等待响应
 - `projects: Project[]` — 项目列表
 - `selectedProjectId: string | null` — 当前选中项目
+- `selectedSessionId: string | null` — 当前选中会话
+- `claudeSessionId: string | null` — Claude CLI 会话 ID（用于 --resume）
 - `sidebarCollapsed: boolean` — 侧边栏折叠状态
 - `paletteVisible: boolean` — 命令面板可见性
 - `connected: boolean` — 连接状态
+- `bgVersion: number` — 后台进程变更版本号（触发会话列表状态同步）
+
+**Refs**:
+- `backgroundRunsRef: Map<string, BackgroundRun>` — 后台运行管理
+- `currentRunIdRef: string | null` — 当前前台 runId
+- `streamContextRef: StreamContext | null` — 当前流上下文（前台/后台标记）
 
 **关键行为**:
-- 切换项目时调用 `resetConversation()` 清空消息
+- 切换项目时：活跃流移入后台（backgroundRunsRef），不取消
+- 发送消息时：若无 selectedSessionId 则自动创建会话
 - 发送消息时携带 `selectedProject?.path` 作为 `cwd`
 - 侧边栏状态和项目 ID 通过 localStorage 持久化
+- 组件卸载时取消所有后台进程
 
 #### MessageList
 
@@ -105,17 +115,26 @@ AgentEvent[] -> 累积 text/thinking -> 遇到 tool_use 时 flush -> Block[]
 
 #### CommandPalette
 
-- 使用 cmdk 库构建
-- 分组显示：Built-in Commands / Local Skills / Plugin Groups
-- 搜索过滤：同时匹配 name 和 description
-- 键盘导航：上下箭头、Enter 选择、Escape 关闭
-- 文件引用模式：@file 触发，调用 /api/files API
+- 使用 cmdk 库构建（命令模式），自建树形文件浏览器（文件模式）
+- 命令模式：分组显示 Built-in Commands / Local Skills / Plugin Groups，搜索过滤
+- 文件模式：树形懒加载文件浏览器
+  - TreeNode 数据模型（name, path, type, children?, loaded?, expanded?）
+  - 懒加载：点击目录通过 /api/files?dir= 加载子项
+  - 独立"选择"按钮确认文件选择（单击只设焦点，不直接选中）
+  - 键盘导航：ArrowUp/ArrowDown 移动焦点，Enter 确认，Escape 关闭
+  - focusedIndex + selectedPath 双状态（焦点与选中分离）
+  - flattenVisibleNodes 深度优先遍历用于键盘索引
+  - FolderIcon / FileIcon / ChevronIcon SVG 图标
 
 #### Sidebar
 
 - 280px 宽，可收缩（width: 0 + opacity: 0）
 - 项目列表：选中高亮 + hover 效果
-- 悬浮显示编辑/删除按钮
+- 每个项目下的会话列表：
+  - 当前会话：蓝色圆点 + 蓝色背景
+  - 运行中会话：绿色脉冲圆点 + 绿色"运行中"徽章 + rgba(34,197,94,0.06) 背景
+  - 空闲会话：空心圆点
+  - hover 显示删除按钮
 - 过渡动画 200ms
 
 #### EmptyState

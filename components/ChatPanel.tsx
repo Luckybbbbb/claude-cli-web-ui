@@ -532,10 +532,12 @@ export function ChatPanel() {
   }, [selectedSessionId, selectedProjectId]);
 
   // ── Submit handler ──
-  const handleSubmit = useCallback(async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    if (!input.trim() || isLoading) return;
+  const handleSubmit = useCallback(async (eOrText: React.FormEvent | string) => {
+    if (typeof eOrText !== 'string') {
+      eOrText.preventDefault();
+    }
+    const text = typeof eOrText === 'string' ? eOrText : input.trim();
+    if (!text || isLoading) return;
 
     // Auto-create session if none selected but project exists
     let activeSessionId = selectedSessionId;
@@ -570,7 +572,7 @@ export function ChatPanel() {
     const userMessage: Message = {
       id: userMessageId,
       role: 'user',
-      content: input.trim(),
+      content: text,
     };
 
     const assistantMessage: Message = {
@@ -770,6 +772,21 @@ export function ChatPanel() {
     }
   }, [input, isLoading, messageCounter, updateLastAssistantMessage, updateBgMessage, selectedProject, selectedSessionId, selectedProjectId, claudeSessionId]);
 
+  // Handle AskUserQuestion answer: send tool_result via stdin round-trip
+  const handleAnswer = useCallback(async (toolUseId: string, answer: string) => {
+    const runId = currentRunIdRef.current;
+    if (!runId) return;
+    try {
+      await fetch(`/api/runs/${runId}/tool-result`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toolUseId, content: answer }),
+      });
+    } catch (err) {
+      console.error('Failed to submit answer:', err);
+    }
+  }, []);
+
   // Quick action handler: fill input with preset prompt
   const handleQuickAction = useCallback((prompt: string) => {
     setInput(prompt);
@@ -847,7 +864,7 @@ export function ChatPanel() {
         {messages.length === 0 ? (
           <EmptyState onQuickAction={handleQuickAction} />
         ) : (
-          <MessageList messages={messages} />
+          <MessageList messages={messages} onSelectAnswer={handleAnswer} />
         )}
 
         {/* Input bar */}

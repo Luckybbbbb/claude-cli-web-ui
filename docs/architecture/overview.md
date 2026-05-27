@@ -6,22 +6,26 @@
 ### 核心概念
 - **Claude CLI Web UI**: 基于 Next.js 14 App Router 的浏览器前端，通过 spawn Claude CLI 子进程实现 Web 对话
 - **stream-json 协议**: Claude CLI 的 --output-format stream-json 输出 JSONL 格式，包含 system、stream_event、assistant、user、result 五种消息类型
-- **命令发现系统**: 文件系统扫描 ~/.claude/skills/ 和 ~/.claude/plugins/cache/，从 SKILL.md 的 YAML frontmatter 提取命令元数据
+- **后台进程管理**: 切换项目时将活跃 Claude CLI 进程移入后台，会话列表实时显示运行状态
+- **树形文件选择器**: 懒加载目录树的文件浏览器，独立确认按钮选择文件
 
 ### 关键数据结构
 - `AgentEvent`: 联合类型（status/text_delta/thinking_delta/tool_use/tool_result/usage/turn_end/error/raw）
 - `RunState`: 运行状态（id/status/events/child process/SSE clients），存储在 globalThis Map 中
 - `Session`: 会话数据（id, projectId, title, cwd, claudeSessionId, messages[], timestamps），JSON 文件持久化
+- `BackgroundRun`: 后台运行状态（sessionId, projectId, runId, reader, messages, abortController, streamContext）
+- `TreeNode`: 树形文件节点（name, path, type, children?, loaded?, expanded?）
 - `Category > CommandItem`: 命令分组结构，用于命令面板展示
 
 ### 核心流程
 - **对话流程**: 用户输入 -> POST /api/chat -> spawn Claude CLI (--resume 可选) -> SSE 流式事件 -> UI 实时渲染 -> 会话持久化
-- **命令发现流程**: 文件系统扫描 -> YAML frontmatter 解析 -> 5 分钟缓存 -> 命令面板分组展示
-- **会话恢复流程**: 切换项目 -> 加载会话列表 -> 选择会话 -> 恢复消息 + claudeSessionId -> 后续对话携带 --resume
+- **后台进程流程**: 切换项目 -> 活跃流移入 backgroundRunsRef Map -> bgVersion 触发会话列表状态同步 -> 恢复时从 Map 取回前台
+- **自动会话创建**: 发送消息 -> 检测无 selectedSessionId -> POST /api/sessions 自动创建 -> 继续对话流程
 
 ### 与其他系统的交互
 - **Claude CLI**: 通过 child_process.spawn 调用，--print 模式传参，--resume 支持会话续接，stdout 解析 JSONL
-- **文件系统**: 扫描用户 ~/.claude/ 目录获取 skills/plugins，扫描项目目录提供文件引用，会话 JSON 持久化
+- **文件系统**: 树形懒加载扫描项目目录、递归扫描文件夹引用、会话 JSON 持久化
+- **LAN 网络**: 绑定 0.0.0.0 + 自动分配端口，支持局域网访问
 <!-- OVERVIEW_END -->
 
 ---
@@ -146,17 +150,93 @@ interface Session {
 
 **引用格式**:
 - `@file path/to/file.ts` -- 读取文件内容，注入为 `<file path="...">` XML 标签
+- `@file path/to/directory` -- 递归扫描目录下所有文件，总内容上限 200KB
 - `@url https://example.com` -- fetch 网页内容，注入为 `<url href="...">` XML 标签
 
 **限制**:
-- 文件内容 50KB 截断
+- 单文件内容 50KB 截断
+- 目录总内容 200KB 截断（MAX_TOTAL_DIR_SIZE），单个文件超 50KB 跳过
+- 目录递归扫描最大深度 5 层
 - URL fetch 10s 超时，内容 50KB 截断
 - 文件不存在时注入错误提示而非中断对话
 
 **Workspace-aware 文件选择**:
-- 文件扫描 API (`/api/files`) 接受 `cwd` 参数
-- 命令面板基于当前选中项目的工作目录扫描文件列表
+- 文件扫描 API (`/api/files`) 接受 `cwd` 和 `dir` 参数
+- 命令面板基于当前选中项目的工作目录，树形懒加载浏览
 - 实现项目切换后文件引用的上下文感知
+
+### 9. 后台进程管理 (Background Process Management)
+
+切换项目时不中断正在运行的 Claude CLI 进程，允许同时运行多个会话。
+
+**核心数据结构**:
+```typescript
+interface StreamContext {
+  isBackground: boolean;
+  activeSessionId: string;
+  selectedProjectId: string | null;
+}
+
+interface BackgroundRun {
+  sessionId: string;
+  projectId: string;
+  runId: string;
+  reader: ReadableStreamDefaultReader;
+  messages: Message[];
+  claudeSessionId: string | null;
+  abortController: AbortController;
+  streamContext: StreamContext;
+}
+```
+
+**状态流转**:
+- `backgroundRunsRef`: Map<sessionId, BackgroundRun> 管理所有后台运行
+- `bgVersion`: 递增计数器，每次后台 Map 变更时 +1，触发 useEffect 同步会话列表 status
+- SSE 事件根据 `streamContext.isBackground` 分发到 `updateLastAssistantMessage`（前台）或 `updateBgMessage`（后台）
+
+**关键行为**:
+- 切换项目时：活跃流移入 backgroundRunsRef，不取消 reader
+- 选择后台会话时：从 Map 取回 reader 和 messages 恢复前台
+- 删除项目/会话时：清理关联的后台进程 + 取消远程 run
+- 组件卸载时：取消所有后台进程
+- 后台流完成后：自动持久化消息，从 Map 移除
+
+### 10. 树形文件选择器 (Tree File Picker)
+
+替换扁平文件列表为树形懒加载文件浏览器。
+
+**数据模型**:
+```typescript
+interface TreeNode {
+  name: string;
+  path: string;
+  type: 'file' | 'directory';
+  children?: TreeNode[];
+  loaded?: boolean;   // 子项是否已加载
+  expanded?: boolean; // 是否展开
+}
+```
+
+**核心函数**:
+- `loadChildren(dirPath, cwd)`: 通过 /api/files?dir= 按需加载子项
+- `entriesToNodes(entries)`: FileEntry[] -> TreeNode[]
+- `updateTreeNode(nodes, path, patch)`: 不可变更新树中指定节点
+- `flattenVisibleNodes(nodes)`: 深度优先遍历展开的节点，用于键盘导航
+
+**交互设计**:
+- 目录：点击展开/折叠（懒加载子项），ChevronIcon 旋转动画
+- 文件/目录：点击设置 selectedPath + focusedIndex
+- 独立"选择"按钮：确认选择并调用 onSelect
+- 键盘：ArrowUp/ArrowDown 移动焦点，Enter 确认，Escape 关闭
+- 排序：目录优先，按名称排列
+
+### 11. 自动会话创建 (Auto-create Session)
+
+发送消息时如果没有选中会话，自动创建新会话。
+
+**流程**: 发送消息 -> 检测 `!selectedSessionId && selectedProjectId` -> POST /api/sessions 创建 -> 刷新会话列表 -> 继续对话
+
+**设计考量**: 使用 `activeSessionId` 局部变量避免闭包引用过期问题。
 
 ### 5. UI 组件系统 (UI Components)
 

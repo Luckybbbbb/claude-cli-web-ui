@@ -184,11 +184,12 @@ export async function POST(request: NextRequest) {
 
     // Build Claude CLI arguments
     // Note: --cwd is not a valid flag, use spawn's cwd option instead
-    // Prompt is passed as the last positional argument
+    // --input-format stream-json enables stdin-based multi-turn interaction (AskUserQuestion tool_result round-trip)
     const args = [
       '--print',
       '--verbose',
       '--output-format', 'stream-json',
+      '--input-format', 'stream-json',
       '--model', effectiveModel,
     ];
 
@@ -196,9 +197,6 @@ export async function POST(request: NextRequest) {
     if (claudeSessionId) {
       args.push('--resume', claudeSessionId);
     }
-
-    // Add prompt as positional argument (required for --print mode)
-    args.push(resolvedMessage);
 
     // Resolve working directory to absolute path
     const resolvedCwd = workingDir.startsWith('.')
@@ -220,6 +218,10 @@ export async function POST(request: NextRequest) {
     // Create stream handler
     const handler = createClaudeStreamHandler((event) => {
       addEvent(run, event);
+      // Track AskUserQuestion tool calls that need host-side answers
+      if (event.type === 'tool_use' && event.name === 'AskUserQuestion' && typeof event.id === 'string') {
+        run.pendingHostAnswers.add(event.id);
+      }
     });
 
     // Handle stdout
@@ -250,8 +252,17 @@ export async function POST(request: NextRequest) {
       setRunStatus(run, 'failed');
     });
 
-    // In --print mode, prompt is passed as argument, no stdin needed
-    run.stdinOpen = false;
+    // Write prompt to stdin as stream-json user message, keep stdin open for tool_result round-trip
+    // (AskUserQuestion answers arrive via POST /api/runs/{id}/tool-result)
+    const stdinMessage = JSON.stringify({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: resolvedMessage }],
+      },
+    }) + '\n';
+    child.stdin.write(stdinMessage);
+    run.stdinOpen = true;
 
     const response: ChatResponse = { runId };
     return NextResponse.json(response);

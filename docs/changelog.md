@@ -4,21 +4,24 @@
 ## 概览
 
 ### 版本范围
-- 初始版本 81ddbf4 到当前版本 936463a，涵盖项目从零搭建到功能完善的全过程
+- 初始版本 81ddbf4 到当前版本 d989852，涵盖项目从零搭建到功能完善的全过程
 
 ### 变更模块
 - **核心通信**: SSE 流式通信、Claude CLI 进程管理、stream-json 解析
 - **命令系统**: 动态命令发现、命令面板、@file/@url 引用解析
 - **UI 系统**: Kimi 风格设计系统、侧边栏、消息渲染、项目管理
 - **会话系统**: 会话持久化、--resume 集成、淘汰策略
+- **文件选择器**: 树形文件浏览器、懒加载目录、独立确认按钮
+- **后台进程**: 切换项目不中断 Claude CLI 进程、会话状态实时显示
 - **API 层**: 对话、命令发现、文件扫描、项目 CRUD、会话 CRUD
 
 ### 关键变更点
 - 从基础 ChatPanel + SSE 演进为完整的命令面板 + 项目管理 + 侧边栏架构
-- 新增文件系统扫描式命令发现，支持插件 skills 和本地 skills
-- 设计系统从简单 Tailwind 升级为 CSS 变量驱动的黑白灰主题
-- 新增会话历史系统，支持 Claude CLI --resume 多轮对话续接
-- @file/@url 引用在服务端解析注入，支持 workspace-aware 文件选择
+- 文件选择器从扁平列表重构为树形结构，支持懒加载和独立确认按钮
+- 新增后台进程管理，切换项目时 Claude CLI 进程不中断
+- 发送消息时自动创建会话，无需手动新建
+- LAN 访问支持（绑定 0.0.0.0，自动分配端口）
+- 文件夹 @file 引用支持递归扫描，200KB 总截断
 <!-- OVERVIEW_END -->
 
 ---
@@ -38,6 +41,8 @@
 | 工作区 | 2026-05-27 | UI 美化 | Kimi 风格设计系统 + 组件美化 |
 | 工作区 | 2026-05-27 | 项目管理 | 侧边栏 + 项目 CRUD + cwd 支持 |
 | 936463a | 2026-05-27 | 会话系统 | Session history + @file/@url + --resume |
+| 29ef54a | 2026-05-27 | 设计文档 | 树形文件选择器 + 后台进程 + 自动会话设计 |
+| d989852 | 2026-05-27 | 重大迭代 | 树形文件选择器 + 后台进程管理 + 自动会话 + LAN |
 
 ---
 
@@ -320,3 +325,122 @@
 
 - **新建** docs/superpowers/specs/2026-05-27-session-history-and-file-picker-design.md
   - 会话历史系统和 workspace-aware 文件选择器的设计规范
+
+### 2026-05-27: 树形文件选择器 + 后台进程管理 + 自动会话
+
+#### 模块: 设计文档
+
+- **29ef54a** `docs: add design spec for tree file picker, background runs, and auto session creation`
+  - docs/superpowers/specs/2026-05-27-iteration-tree-picker-bg-runs-auto-session-design.md
+  - 树形文件选择器、后台进程管理、自动创建会话的详细设计规范
+
+#### 模块: 树形文件选择器
+
+- **重写** components/CommandPalette.tsx
+  - 从扁平文件列表重构为树形文件浏览器（TreeNode 数据模型）
+  - 懒加载目录：点击目录时通过 /api/files?dir= 按需加载子项
+  - 独立的"选择"按钮确认选择（而非单击直接选中）
+  - 目录展开/折叠带 ChevronIcon 旋转动画
+  - FolderIcon / FileIcon SVG 图标（无 emoji）
+  - 键盘导航：ArrowUp/ArrowDown 移动焦点，Enter 确认选择，Escape 关闭
+  - flattenVisibleNodes 函数实现深度优先遍历用于键盘索引
+  - 底部提示文字："点击选中 . 点击「选择」按钮确认 . 文件夹点击展开/折叠"
+  - focusedIndex + selectedPath 双状态管理（焦点与选中分离）
+
+- **重写** app/api/files/route.ts
+  - 从递归全量扫描改为单层目录扫描（懒加载基础）
+  - 新增 dir 参数：指定要列出的子目录路径
+  - 移除 prefix 和 limit 参数
+  - 路径遍历防护：拒绝包含 ".." 的路径
+  - 排序规则：目录优先（按名称），然后文件（按名称）
+  - 每个条目返回 relativePath（相对于 rootDir）
+
+#### 模块: 后台进程管理
+
+- **更新** components/ChatPanel.tsx
+  - 新增 StreamContext 接口：{ isBackground, activeSessionId, selectedProjectId }
+  - 新增 BackgroundRun 接口：{ sessionId, projectId, runId, reader, messages, claudeSessionId, abortController, streamContext }
+  - backgroundRunsRef: Map<string, BackgroundRun> 管理所有后台运行
+  - bgVersion 状态触发 Session 列表状态同步（running/idle）
+  - 切换项目时（handleSelectProject）：如有活跃流，将其移入后台而非取消
+  - 选择后台会话时（handleSelectSession）：恢复后台流到前台
+  - 删除项目/会话时：清理关联的后台进程
+  - 组件卸载时：取消所有后台进程
+  - SSE 事件处理中根据 streamContext.isBackground 分发到不同更新路径
+  - 后台流完成后自动持久化消息并清理
+
+- **更新** components/Sidebar.tsx
+  - 会话状态指示器：运行中显示绿色脉冲圆点（pulse 动画）
+  - 运行中标签：绿色"运行中"徽章（background rgba(34,197,94,0.15)）
+  - 运行中会话不显示相对时间，而是显示状态标签
+  - 运行中会话背景色微调：rgba(34,197,94,0.06)
+
+- **更新** lib/sessions.ts
+  - SessionMeta 新增 status?: 'running' | 'idle' 字段（前端状态，不持久化）
+
+#### 模块: 自动创建会话
+
+- **更新** components/ChatPanel.tsx
+  - 发送消息时检查 selectedSessionId：如果为空但有 selectedProjectId，自动 POST /api/sessions 创建
+  - 创建后自动刷新会话列表
+  - 使用 activeSessionId 局部变量避免闭包引用过期
+
+#### 模块: 文件夹 @file 引用
+
+- **更新** app/api/chat/route.ts
+  - resolveReferences 函数支持目录路径引用
+  - 新增 scanDirectoryFiles 递归扫描函数（最大深度 5 层）
+  - 忽略 node_modules/.git/.next/.superpowers 目录
+  - 总内容上限 200KB（MAX_TOTAL_DIR_SIZE）
+  - 单文件超过 50KB 则跳过
+  - 超出预算时截断当前文件并显示省略文件数
+  - 每个文件使用 relative path 注入 XML 标签
+
+#### 模块: LAN 访问与启动
+
+- **更新** package.json
+  - dev 脚本从 `next dev` 改为 `next dev -H 0.0.0.0 -p 0`（绑定所有网卡，自动分配端口）
+  - 新增 cmdk 依赖 (^1.1.1)
+
+- **新建** start.bat
+  - Windows 一键启动脚本：切换到脚本目录后执行 pnpm dev
+
+#### 模块: UI 美化迭代
+
+- **更新** app/globals.css
+  - 新增 @keyframes pulse（绿色脉冲动画，用于后台进程指示器）
+  - 完整的 CSS 变量体系（背景、文本、气泡、边框、强调色）
+  - cmdk 选中状态样式
+  - 移动端安全区域工具类
+  - 侧边栏过渡类（.sidebar-panel / .sidebar-collapsed）
+
+- **更新** app/layout.tsx
+  - 新增 Viewport 元数据（width=device-width, initialScale=1, maximumScale=5）
+  - 语言改为 zh-CN
+  - body 添加 h-screen overflow-hidden
+
+- **美化** components/MessageList.tsx
+  - 助手消息气泡改用 CSS 变量背景色和自定义圆角
+  - animate-message-appear 进入动画
+  - 思考指示器改用 CSS 变量颜色
+
+- **美化** components/ThinkingBlock.tsx
+  - 淡黄色主题（#fefce8 背景，#fde68a 边框，#92400e 文字）
+  - 思考灯泡图标 SVG
+  - 中文文案："思考中... (N 字)"
+  - max-height 过渡动画替代条件渲染
+
+- **美化** components/ToolCard.tsx
+  - 左侧色条（绿色成功/红色错误/默认强调色）
+  - SVG 工具图标替代 emoji 图标
+  - 卡片阴影（card-shadow 类）
+  - 状态徽章（Done 绿色/Error 红色）
+  - max-height 过渡动画
+
+- **美化** components/AssistantMessage.tsx
+  - 文本块添加 text-sm leading-relaxed 和 CSS 变量颜色
+
+- **更新** .gitignore
+  - 新增 .superpowers/ 忽略
+  - 新增 data/ 忽略（项目数据目录）
+  - 新增 .claude/settings.local.json 忽略

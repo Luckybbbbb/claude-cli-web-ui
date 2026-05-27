@@ -71,6 +71,12 @@ while (true) {
 }
 ```
 
+**前台/后台分发**: SSE 事件到达时，根据 `streamContext.isBackground` 决定更新路径：
+- 前台模式：调用 `updateLastAssistantMessage` 更新当前 UI 状态
+- 后台模式：调用 `updateBgMessage` 更新 BackgroundRun 中的 messages 数组
+
+**后台持久化**: 后台流完成后（status succeeded/failed/canceled），自动从 backgroundRunsRef 中取出 messages 并 PUT /api/sessions 持久化，然后从 Map 中移除。
+
 ### @file 和 @url 引用解析 (chat/route.ts)
 
 在发送给 Claude CLI 之前，chat API 会解析消息中的引用：

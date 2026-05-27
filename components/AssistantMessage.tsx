@@ -6,9 +6,11 @@ import remarkGfm from 'remark-gfm';
 import { AgentEvent } from '@/lib/types';
 import { ThinkingBlock } from './ThinkingBlock';
 import { ToolCard } from './ToolCard';
+import { QuestionCard } from './QuestionCard';
 
 interface AssistantMessageProps {
   events: AgentEvent[];
+  onSelectAnswer?: (toolUseId: string, answer: string) => void;
 }
 
 interface Block {
@@ -23,7 +25,7 @@ interface Block {
   };
 }
 
-export function AssistantMessage({ events }: AssistantMessageProps) {
+export function AssistantMessage({ events, onSelectAnswer }: AssistantMessageProps) {
   const blocks = useMemo(() => {
     const result: Block[] = [];
     let currentText = '';
@@ -128,9 +130,23 @@ export function AssistantMessage({ events }: AssistantMessageProps) {
             );
 
           case 'tool':
-            return block.tool ? (
-              <ToolCard key={index} tool={block.tool} />
-            ) : null;
+            if (!block.tool) return null;
+            if (block.tool.name === 'AskUserQuestion' && onSelectAnswer) {
+              const input = block.tool.input as { questions?: Array<{ question: string; header?: string; options: Array<{ label: string; description?: string }>; multiSelect?: boolean }> } | null;
+              if (input?.questions) {
+                return (
+                  <QuestionCard
+                    key={index}
+                    toolUseId={block.tool.id}
+                    questions={input.questions}
+                    result={block.tool.result}
+                    isError={block.tool.isError}
+                    onSelect={onSelectAnswer}
+                  />
+                );
+              }
+            }
+            return <ToolCard key={index} tool={block.tool} />;
 
           default:
             return null;

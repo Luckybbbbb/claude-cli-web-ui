@@ -14,9 +14,10 @@ interface Message {
 
 interface MessageListProps {
   messages: Message[];
+  onSelectAnswer?: (toolUseId: string, answer: string) => void;
 }
 
-export function MessageList({ messages }: MessageListProps) {
+export function MessageList({ messages, onSelectAnswer }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -79,7 +80,7 @@ export function MessageList({ messages }: MessageListProps) {
               </p>
             ) : (
               <>
-                <AssistantMessage events={message.events || []} />
+                <AssistantMessage events={message.events || []} onSelectAnswer={onSelectAnswer} />
                 {message.status === 'running' && (
                   <div className="mt-2 flex items-center text-sm" style={{ color: 'var(--text-secondary)' }}>
                     <div className="animate-pulse mr-2 h-2 w-2 rounded-full" style={{ backgroundColor: 'var(--accent)' }} />

@@ -86,6 +86,17 @@
 1. 用户点击 Sidebar 中的项目
 2. ChatPanel.handleSelectProject 被调用
 3. 如果是同一项目，直接返回
-4. 否则：resetConversation()（清空消息、取消流）-> 更新 selectedProjectId -> localStorage 持久化
-5. 后续发送消息时，requestBody.cwd = selectedProject.path
-6. 服务端 chat API 使用 cwd 作为 spawn 的 options.cwd
+4. 如果有活跃的前台 SSE 流（readerRef.current && selectedSessionId）：
+   - 将当前流移入后台（backgroundRunsRef Map）
+   - 设置 streamContext.isBackground = true
+   - 拷贝 messages 到 BackgroundRun
+   - 递增 bgVersion 触发会话列表状态同步
+5. 否则：cancelStream() 取消当前流
+6. 更新 selectedProjectId，localStorage 持久化
+7. 后续发送消息时，requestBody.cwd = selectedProject.path
+8. 服务端 chat API 使用 cwd 作为 spawn 的 options.cwd
+
+**删除项目时的清理**:
+- 遍历 backgroundRunsRef，取消该项目下所有后台进程
+- 对每个后台 run 发送 POST /api/runs/{runId}/cancel
+- 从 Map 中移除，递增 bgVersion
