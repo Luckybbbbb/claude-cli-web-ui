@@ -1,160 +1,89 @@
-# 设计文档：Claude CLI 交互式模式（长连接）
+# 设计文档：Claude CLI 流式输入模式（stdin 长连接）
 
 ## 背景
 
-当前 Web UI 使用 Claude CLI 的 `--print` 模式，每条消息 spawn 一个新进程，stdin 写入 prompt 后立即关闭。这导致：
+当前 Web UI 使用 Claude CLI 的 `--print` 模式，stdin 写入 prompt 后立即关闭。这导致 AskUserQuestion 无法交互——CLI 自动选择默认项，用户无法真正参与选择。
 
-1. **AskUserQuestion 无法交互**：stdin 关闭后 CLI 无法等待用户输入，自动选择默认项
-2. **每条消息都有进程启动开销**：spawn + `--resume` 恢复上下文增加延迟
-3. **已有机制未激活**：项目预置了 `pendingHostAnswers` + `tool-result` API 的完整回传机制，但因 stdin 提前关闭而无法使用
+## 协议验证结果
 
-## 设计目标
+通过实测确认，Claude CLI 支持 `--print --input-format stream-json` 组合：
 
-将 Claude CLI 从 `--print` 一次性模式切换为交互式长连接模式，实现：
-- 真正的 AskUserQuestion 交互（stdin 回传 tool_result）
-- 每会话一个进程，消息通过 stdin 持续发送
-- 保持现有所有功能不变（后台进程、会话持久化、@file 引用等）
+- **多轮 stdin 消息**：stdin 保持打开时，可连续写入多条 JSONL user message，CLI 依次处理
+- **AskUserQuestion tool_result 回传**：通过 stdin 写入 tool_result JSON，CLI 在同一进程内继续生成
+- **进程正常退出**：所有交互完成后关闭 stdin，进程正常退出
 
-## 第一步：协议验证
+关键发现：**不需要去掉 `--print`**，只需加上 `--input-format stream-json` 参数。
 
-在正式实施前，先验证无 `--print` 模式下的 JSONL 交互协议：
+## 设计方案（简化版）
 
-```bash
-claude --output-format stream-json
-# stdin 写入（不关闭）：
-{"type":"user","message":{"role":"user","content":[{"type":"text","text":"你好"}]}}
-# 观察 stdout 输出
-# 继续写入第二条消息
-# 验证 AskUserQuestion tool_result 回传
+保留现有 `--print` + 每条消息 spawn 新进程的架构，仅做最小改动：
+
+1. CLI 参数加上 `--input-format stream-json`
+2. stdin 保持打开（不立即 `child.stdin.end()`）
+3. `pendingHostAnswers` 机制激活（已有代码，只需 stdin 开放）
+4. `handleAnswer` 改为调已有的 `tool-result` API
+
+### 变更前后对比
+
+| 项目 | 变更前 | 变更后 |
+|------|--------|--------|
+| CLI 参数 | `--print --verbose --output-format stream-json` | `+ --input-format stream-json` |
+| stdin | 写入 prompt 后立即关闭 | 保持打开，等待 tool_result |
+| stdinOpen | `false` | `true`（有 pendingHostAnswers 时） |
+| AskUserQuestion | 自动选择默认项 | 用户选择后通过 stdin 回传 |
+| handleAnswer | `handleSubmit(answer)` 发新消息 | `POST /api/runs/{id}/tool-result` |
+| 进程模型 | 不变：每条消息 spawn 新进程 | 不变 |
+| --resume | 不变 | 不变 |
+
+## 具体改动
+
+### 1. `app/api/chat/route.ts`
+
+- args 加上 `--input-format stream-json`
+- prompt 改为 JSONL 格式写入 stdin（匹配 stream-json input 协议）
+- stdin 保持打开：`run.stdinOpen = true`
+- 无 pendingHostAnswers 时在进程退出后自动清理
+
+stdin 写入格式变更：
+```
+之前：child.stdin.write(resolvedMessage)
+之后：child.stdin.write(JSON.stringify({type:"user",message:{role:"user",content:[{type:"text",text:resolvedMessage}]}}) + "\n")
 ```
 
-验证要点：
-1. stdin 写入后进程是否立即处理（不需要 EOF）
-2. stdout 输出格式是否与 `--print` 一致
-3. 多轮消息通过 stdin 持续交互
-4. tool_result 回传被正确接收
+### 2. `components/ChatPanel.tsx`
 
-## 架构设计
+- `handleAnswer` 改为调 `POST /api/runs/{runId}/tool-result`
+- `handleSubmit` 不变（仍 POST /api/chat，每条消息 spawn 新进程）
 
-### 每会话一进程模型
+### 3. 不需要改动的文件
+
+- `tool-result/route.ts`：已有完整实现，只需 `stdinOpen=true` 即可激活
+- `claude-stream.ts`：流解析不变，`pendingHostAnswers` 注册逻辑已在上次实现中加入
+- `runs.ts`：RunState 不变
+- `QuestionCard`、`AssistantMessage`、`MessageList`：已对齐
+- 其他所有组件：无需改动
+
+## AskUserQuestion 完整流程
 
 ```
-Session 创建
-  → 首条消息时 spawn: claude --output-format stream-json --model <model>
-  → stdin 保持打开，stdout 连接到 SSE 流
-  → 进程与 sessionId 绑定，存入 ProcessPool
-
-用户发消息
-  → POST /api/sessions/{id}/message
-  → 向已有进程 stdin 写入 JSONL user message
-  → 无需 --resume
-
-AskUserQuestion
-  → stdout 输出 tool_use → QuestionCard 渲染
-  → 用户选择 → POST /api/runs/{id}/tool-result → stdin 写回 tool_result
-  → 进程继续生成
-
-切换项目
-  → 进程保留在 ProcessPool，reader 继续消费
-  → 新项目会话从 ProcessPool 查找或 spawn 新进程
-
-进程超时
-  → 空闲 10 分钟自动关闭
-  → 下次消息重新 spawn + --resume 恢复上下文
+1. 用户发消息 → POST /api/chat → spawn claude --print --input-format stream-json ...
+2. prompt 通过 stdin 写入（JSONL 格式），stdin 保持打开
+3. Claude 处理消息，遇到 AskUserQuestion → stdout 输出 tool_use 事件
+4. claude-stream.ts 解析 tool_use，onEvent 回调将其 id 加入 pendingHostAnswers
+5. SSE 推送到前端 → QuestionCard 渲染选项
+6. 用户点击选项 → POST /api/runs/{runId}/tool-result
+7. 服务端通过 stdin 写回 tool_result JSONL
+8. Claude 在同一进程内继续生成（使用用户的真实选择）
+9. 最终输出 result 事件，进程退出
 ```
 
-### ProcessPool 状态管理
+## stdin 关闭时机
 
-新增 `lib/process-pool.ts`：
+- **有 AskUserQuestion**：tool-result API 在 `pendingHostAnswers` 清空后关闭 stdin
+- **无 AskUserQuestion**：不需要 stdin 保持打开，但保持打开也不影响（进程处理完自动退出）
+- **取消运行**：SIGTERM 终止进程，stdin 自动清理
 
-```typescript
-interface ProcessState {
-  sessionId: string;
-  projectId: string;
-  child: ChildProcess;
-  runId: string;
-  status: 'active' | 'idle' | 'closed';
-  lastActivityAt: number;
-  claudeSessionId: string;
-}
-```
+## 风险与注意事项
 
-- 使用 `globalThis` Map 持久化（跨 HMR）
-- 30 秒间隔检查空闲进程，超过 10 分钟的 SIGTERM 清理
-- 不限制后台进程数量（保留当前行为）
-
-### 现有 vs 新架构对比
-
-| 现有（--print） | 新（交互式） |
-|---|---|
-| 每条消息 spawn 新进程 | 每会话一个长期进程 |
-| stdin 写完即关 | stdin 保持打开 |
-| --resume 恢复上下文 | 同一进程内自然延续 |
-| AskUserQuestion 无法交互 | 真正的 tool_result 回传 |
-| runs.ts 管理 run | 新增 ProcessPool 管理进程 |
-
-## API 变更
-
-### `POST /api/chat` → `POST /api/sessions/{id}/message`
-
-- 从 ProcessPool 查找 sessionId 对应的进程
-- 进程存在：向 stdin 写入 user message JSONL
-- 进程不存在：spawn 新进程（无 `--print`），stdin 保持打开
-- @file/@url 引用解析不变
-- 返回 `{ runId }`
-
-stdin 写入格式：
-```jsonl
-{"type":"user","message":{"role":"user","content":[{"type":"text","text":"消息内容"}]}}
-```
-
-### `POST /api/runs/{id}/tool-result`（激活）
-
-- `stdinOpen` 始终为 true
-- 前端 `handleAnswer` 直接调此端点
-- 写入后从 `pendingHostAnswers` 删除，清空时关闭 stdin
-
-### `GET /api/runs/{id}/events`（不变）
-
-### `POST /api/runs/{id}/cancel`（不变）
-
-### 空闲清理
-
-- ProcessPool 内 `setInterval`（30秒）检查
-- 超过 10 分钟无活动的进程 SIGTERM + 从 Pool 移除
-
-## 前端变更
-
-### ChatPanel.tsx
-
-1. **handleSubmit**：请求 URL 从 `/api/chat` 改为 `/api/sessions/{id}/message`
-2. **handleAnswer**：从 `handleSubmit(answer)` 改为 `POST /api/runs/{runId}/tool-result`
-3. 后台进程管理逻辑不变
-
-### 不需要改动的组件
-
-- MessageList、AssistantMessage、QuestionCard — 已对齐
-- Sidebar、Header、EmptyState — 无需改动
-- CommandPalette、文件树 — 无需改动
-- claude-stream.ts — 流解析不变
-- sessions.ts — 会话持久化不变
-
-## 文件变更清单
-
-| 文件 | 操作 |
-|------|------|
-| `lib/process-pool.ts` | 新建：进程池管理 |
-| `app/api/sessions/[id]/message/route.ts` | 新建：发送消息端点 |
-| `app/api/chat/route.ts` | 修改：去掉 `--print`，stdin 保持打开 |
-| `app/api/runs/[id]/tool-result/route.ts` | 修改：适配 stdinOpen=true |
-| `components/ChatPanel.tsx` | 修改：handleSubmit URL + handleAnswer 调用 |
-
-## 实施顺序
-
-1. 协议验证：测试无 `--print` 模式的 stdin/stdout JSONL 交互
-2. 新建 `lib/process-pool.ts`：进程池 + 空闲清理
-3. 修改 `chat/route.ts`：去掉 `--print`，stdin 保持打开
-4. 新建 `sessions/[id]/message/route.ts`：复用进程发消息
-5. 修改 `tool-result/route.ts`：适配交互模式
-6. 修改 `ChatPanel.tsx`：API 调用方式切换
-7. 端到端测试：普通对话 + AskUserQuestion + 后台切换
+- stdin 保持打开意味着进程不会因 stdin EOF 而提前退出，需确保 stdout 正确处理 `result` 事件后的进程退出
+- `--input-format stream-json` 是较新的 CLI 参数，需确认用户安装的 CLI 版本支持
