@@ -1,8 +1,27 @@
 'use client';
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, KeyboardEvent } from 'react';
 import { AgentEvent, ChatResponse } from '@/lib/types';
 import { MessageList } from './MessageList';
+import { CommandPalette } from './CommandPalette';
+import { Header } from './Header';
+import { Sidebar } from './Sidebar';
+import { AddProjectModal } from './AddProjectModal';
+import { EmptyState } from './EmptyState';
+import { parseTrigger } from '@/lib/commands';
+import type { Project } from '@/lib/projects';
+import type { SessionMeta } from '@/lib/sessions';
+
+interface SessionData {
+  id: string;
+  projectId: string;
+  title: string;
+  cwd: string;
+  claudeSessionId: string | null;
+  messages: Message[];
+  createdAt: string;
+  updatedAt: string;
+}
 
 interface Message {
   id: string;
@@ -13,18 +32,167 @@ interface Message {
 }
 
 export function ChatPanel() {
+  // ── Chat state ──
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [messageCounter, setMessageCounter] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const [cursorPos, setCursorPos] = useState(0);
+  const [paletteVisible, setPaletteVisible] = useState(false);
+  const [connected, setConnected] = useState(true);
 
-  // Cleanup EventSource on unmount to prevent memory leaks
+  // ── Project state ──
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem('sidebarCollapsed') === 'true';
+  });
+
+  // ── Session state ──
+  const [sessions, setSessions] = useState<SessionMeta[]>([]);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [claudeSessionId, setClaudeSessionId] = useState<string | null>(null);
+
+  // ── AddProjectModal state ──
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editingProject, setEditingProject] = useState<Project | undefined>(undefined);
+
+  // ── Refs ──
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const inputBarRef = useRef<HTMLDivElement>(null);
+  const readerRef = useRef<ReadableStreamDefaultReader | null>(null);
+  const projectsLoadedRef = useRef(false);
+  const messagesRef = useRef<Message[]>([]);
+
+  // ── Derived: selected project ──
+  const selectedProject = projects.find((p) => p.id === selectedProjectId) || null;
+
+  // ── Keep messagesRef in sync ──
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+
+  // ── Fetch projects on mount ──
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadProjects() {
+      try {
+        const res = await fetch('/api/projects');
+        if (!res.ok) return;
+        const data: Project[] = await res.json();
+
+        if (cancelled) return;
+
+        setProjects(data);
+
+        // Restore selected project from localStorage
+        const storedId = localStorage.getItem('selectedProjectId');
+
+        if (storedId && data.some((p) => p.id === storedId)) {
+          setSelectedProjectId(storedId);
+        } else if (data.length > 0) {
+          // Auto-select first project
+          setSelectedProjectId(data[0].id);
+          localStorage.setItem('selectedProjectId', data[0].id);
+        }
+
+        projectsLoadedRef.current = true;
+      } catch (err) {
+        console.error('Failed to load projects:', err);
+        projectsLoadedRef.current = true;
+      }
+    }
+
+    loadProjects();
+    return () => { cancelled = true; };
+  }, []);
+
+  // ── Persist sidebar collapsed state ──
+  useEffect(() => {
+    localStorage.setItem('sidebarCollapsed', String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+
+  // ── Persist selected project id ──
+  useEffect(() => {
+    if (selectedProjectId) {
+      localStorage.setItem('selectedProjectId', selectedProjectId);
+    }
+  }, [selectedProjectId]);
+
+  // ── Load sessions when project changes ──
+  useEffect(() => {
+    if (!selectedProjectId) { setSessions([]); setSelectedSessionId(null); return; }
+    fetch(`/api/sessions?projectId=${selectedProjectId}`)
+      .then(r => r.ok ? r.json() : { sessions: [] })
+      .then(data => {
+        setSessions(data.sessions || []);
+        // Auto-select newest session
+        if (data.sessions?.length > 0) {
+          setSelectedSessionId(data.sessions[0].id);
+          // Load full session data
+          fetch(`/api/sessions/${data.sessions[0].id}`)
+            .then(r => r.ok ? r.json() : null)
+            .then(sData => {
+              if (sData?.session?.messages) {
+                setMessages(sData.session.messages);
+                setClaudeSessionId(sData.session.claudeSessionId || null);
+              }
+            });
+        }
+      })
+      .catch(() => setSessions([]));
+  }, [selectedProjectId]);
+
+  // ── Auto-resize textarea ──
+  const adjustTextareaHeight = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    const maxHeight = 120;
+    textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
+    if (textarea.scrollHeight > maxHeight) {
+      textarea.style.overflowY = 'auto';
+    } else {
+      textarea.style.overflowY = 'hidden';
+    }
+  }, []);
+
+  // Reset textarea height when input is cleared
+  useEffect(() => {
+    if (!input) {
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+        textareaRef.current.style.overflowY = 'hidden';
+      }
+    }
+  }, [input]);
+
+  // visualViewport listener for virtual keyboard
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+
+    const onResize = () => {
+      if (inputBarRef.current) {
+        inputBarRef.current.style.bottom = `${window.innerHeight - vv.height - vv.offsetTop}px`;
+      }
+    };
+
+    vv.addEventListener('resize', onResize);
+    vv.addEventListener('scroll', onResize);
+    return () => {
+      vv.removeEventListener('resize', onResize);
+      vv.removeEventListener('scroll', onResize);
+    };
+  }, []);
+
+  // Cleanup reader on unmount
   useEffect(() => {
     return () => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
+      if (readerRef.current) {
+        readerRef.current.cancel().catch(() => {});
       }
     };
   }, []);
@@ -44,6 +212,199 @@ export function ChatPanel() {
     });
   }, []);
 
+  // ── Cancel any running SSE stream ──
+  const cancelStream = useCallback(() => {
+    if (readerRef.current) {
+      readerRef.current.cancel().catch(() => {});
+      readerRef.current = null;
+    }
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+  }, []);
+
+  // ── Reset conversation (clear messages + cancel stream) ──
+  const resetConversation = useCallback(() => {
+    cancelStream();
+    setMessages([]);
+    setIsLoading(false);
+  }, [cancelStream]);
+
+  // ── Project CRUD handlers ──
+
+  const handleSelectProject = useCallback((id: string) => {
+    if (id === selectedProjectId) return;
+    resetConversation();
+    setSelectedProjectId(id);
+    localStorage.setItem('selectedProjectId', id);
+  }, [selectedProjectId, resetConversation]);
+
+  const handleAddProject = useCallback(() => {
+    setEditingProject(undefined);
+    setModalOpen(true);
+  }, []);
+
+  const handleEditProject = useCallback((id: string) => {
+    const project = projects.find((p) => p.id === id);
+    setEditingProject(project);
+    setModalOpen(true);
+  }, [projects]);
+
+  const handleDeleteProject = useCallback(async (id: string) => {
+    try {
+      const res = await fetch('/api/projects', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        console.error('Delete project error:', err.error);
+        return;
+      }
+
+      setProjects((prev) => prev.filter((p) => p.id !== id));
+
+      // If deleted the selected project, select another or clear
+      if (id === selectedProjectId) {
+        const remaining = projects.filter((p) => p.id !== id);
+        if (remaining.length > 0) {
+          const nextId = remaining[0].id;
+          setSelectedProjectId(nextId);
+          localStorage.setItem('selectedProjectId', nextId);
+        } else {
+          setSelectedProjectId(null);
+          localStorage.removeItem('selectedProjectId');
+        }
+        resetConversation();
+      }
+    } catch (err) {
+      console.error('Failed to delete project:', err);
+    }
+  }, [selectedProjectId, projects, resetConversation]);
+
+  const handleModalSave = useCallback(async (data: { name: string; path: string }) => {
+    if (editingProject) {
+      // Update existing project
+      try {
+        const res = await fetch('/api/projects', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: editingProject.id, name: data.name, path: data.path }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          console.error('Update project error:', err.error);
+          return;
+        }
+        const updated: Project = await res.json();
+        setProjects((prev) => prev.map((p) => p.id === updated.id ? updated : p));
+      } catch (err) {
+        console.error('Failed to update project:', err);
+      }
+    } else {
+      // Add new project
+      try {
+        const res = await fetch('/api/projects', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: data.name, path: data.path }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          console.error('Add project error:', err.error);
+          return;
+        }
+        const newProject: Project = await res.json();
+        setProjects((prev) => [...prev, newProject]);
+
+        // Auto-select the newly added project
+        setSelectedProjectId(newProject.id);
+        localStorage.setItem('selectedProjectId', newProject.id);
+        resetConversation();
+      } catch (err) {
+        console.error('Failed to add project:', err);
+      }
+    }
+    setModalOpen(false);
+    setEditingProject(undefined);
+  }, [editingProject, resetConversation]);
+
+  const handleToggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => !prev);
+  }, []);
+
+  // ── Session CRUD handlers ──
+
+  const handleNewSession = useCallback(async () => {
+    if (!selectedProjectId) return;
+    try {
+      const res = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId: selectedProjectId }),
+      });
+      if (!res.ok) return;
+      const { session } = await res.json();
+      setSelectedSessionId(session.id);
+      setClaudeSessionId(null);
+      setMessages([]);
+      // Refresh sessions list
+      const listRes = await fetch(`/api/sessions?projectId=${selectedProjectId}`);
+      if (listRes.ok) {
+        const listData = await listRes.json();
+        setSessions(listData.sessions || []);
+      }
+    } catch (err) {
+      console.error('Failed to create session:', err);
+    }
+  }, [selectedProjectId]);
+
+  const handleSelectSession = useCallback(async (sessionId: string) => {
+    if (sessionId === selectedSessionId) return;
+    cancelStream();
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}`);
+      if (!res.ok) return;
+      const { session } = await res.json();
+      setSelectedSessionId(sessionId);
+      setClaudeSessionId(session.claudeSessionId || null);
+      setMessages(session.messages || []);
+      setIsLoading(false);
+    } catch (err) {
+      console.error('Failed to load session:', err);
+    }
+  }, [selectedSessionId, cancelStream]);
+
+  const handleDeleteSession = useCallback(async (sessionId: string) => {
+    try {
+      const res = await fetch('/api/sessions', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: sessionId }),
+      });
+      if (!res.ok) return;
+      // If deleted current session, clear messages
+      if (sessionId === selectedSessionId) {
+        setMessages([]);
+        setSelectedSessionId(null);
+        setClaudeSessionId(null);
+      }
+      // Refresh list
+      if (selectedProjectId) {
+        const listRes = await fetch(`/api/sessions?projectId=${selectedProjectId}`);
+        if (listRes.ok) {
+          const listData = await listRes.json();
+          setSessions(listData.sessions || []);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to delete session:', err);
+    }
+  }, [selectedSessionId, selectedProjectId]);
+
+  // ── Submit handler ──
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -70,14 +431,27 @@ export function ChatPanel() {
 
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
     setInput('');
+    setPaletteVisible(false);
     setIsLoading(true);
+    setConnected(true);
 
     try {
+      // Build request body with cwd from selected project
+      const requestBody: { message: string; cwd?: string; claudeSessionId?: string } = {
+        message: userMessage.content,
+      };
+      if (selectedProject?.path) {
+        requestBody.cwd = selectedProject.path;
+      }
+      if (claudeSessionId) {
+        requestBody.claudeSessionId = claudeSessionId;
+      }
+
       // Start the chat run
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userMessage.content }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -90,6 +464,7 @@ export function ChatPanel() {
       // Use fetch to read SSE stream (more reliable than EventSource)
       const sseResponse = await fetch(`/api/runs/${runId}/events`);
       const reader = sseResponse.body!.getReader();
+      readerRef.current = reader;
       const decoder = new TextDecoder();
       let buffer = '';
 
@@ -121,6 +496,17 @@ export function ChatPanel() {
                           ? 'failed'
                           : msg.status
                     }));
+                    // Capture Claude session ID from agent events
+                    if (data.sessionId) {
+                      setClaudeSessionId(data.sessionId);
+                      if (selectedSessionId) {
+                        fetch('/api/sessions', {
+                          method: 'PUT',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ id: selectedSessionId, claudeSessionId: data.sessionId }),
+                        }).catch(() => {});
+                      }
+                    }
                   } else if (currentEvent === 'status') {
                     updateLastAssistantMessage((msg) => ({
                       ...msg,
@@ -129,6 +515,7 @@ export function ChatPanel() {
 
                     if (data.status === 'succeeded' || data.status === 'failed' || data.status === 'canceled') {
                       reader.cancel();
+                      readerRef.current = null;
                       setIsLoading(false);
                       return;
                     }
@@ -141,8 +528,29 @@ export function ChatPanel() {
           }
         } catch (error) {
           console.error('SSE stream error:', error);
+          setConnected(false);
         } finally {
+          readerRef.current = null;
           setIsLoading(false);
+          // Persist session after stream ends
+          if (selectedSessionId) {
+            const currentMsgs = messagesRef.current;
+            const title = currentMsgs.length > 0 && currentMsgs[0].role === 'user'
+              ? currentMsgs[0].content.slice(0, 50)
+              : undefined;
+            fetch('/api/sessions', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: selectedSessionId, messages: currentMsgs, title }),
+            }).catch(() => {});
+            // Refresh session list
+            if (selectedProjectId) {
+              fetch(`/api/sessions?projectId=${selectedProjectId}`)
+                .then(r => r.ok ? r.json() : { sessions: [] })
+                .then(d => setSessions(d.sessions || []))
+                .catch(() => {});
+            }
+          }
         }
       };
 
@@ -150,6 +558,7 @@ export function ChatPanel() {
     } catch (error) {
       console.error('Chat error:', error);
       setIsLoading(false);
+      setConnected(false);
 
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
       setError(errorMessage);
@@ -163,46 +572,270 @@ export function ChatPanel() {
         ]
       }));
     }
-  }, [input, isLoading, messageCounter, updateLastAssistantMessage]);
+  }, [input, isLoading, messageCounter, updateLastAssistantMessage, selectedProject, selectedSessionId, selectedProjectId, claudeSessionId]);
+
+  // Quick action handler: fill input with preset prompt
+  const handleQuickAction = useCallback((prompt: string) => {
+    setInput(prompt);
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (textarea) {
+        textarea.focus();
+        textarea.setSelectionRange(prompt.length, prompt.length);
+        adjustTextareaHeight();
+      }
+    });
+  }, [adjustTextareaHeight]);
 
   return (
-    <div className="flex flex-col h-screen bg-white dark:bg-gray-900">
-      <MessageList messages={messages} />
-
-      {error && (
-        <div className="mb-4 p-4 bg-red-100 dark:bg-red-900 text-red-700 dark:text-red-300 rounded-lg mx-4">
-          {error}
-          <button
-            onClick={() => setError(null)}
-            className="ml-2 underline"
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
-
-      <form
-        onSubmit={handleSubmit}
-        className="border-t border-gray-200 dark:border-gray-700 p-4"
+    <div
+      className="flex h-screen"
+      style={{ backgroundColor: 'var(--bg-primary)' }}
+    >
+      {/* ── Sidebar ── */}
+      <div
+        className={`sidebar-panel shrink-0 ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
+        style={{
+          width: sidebarCollapsed ? '0px' : '280px',
+          overflow: 'hidden',
+        }}
       >
-        <div className="flex space-x-2">
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Type your message..."
-            disabled={isLoading}
-            className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-800 disabled:opacity-50"
-          />
-          <button
-            type="submit"
-            disabled={isLoading || !input.trim()}
-            className="px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+        <Sidebar
+          projects={projects}
+          selectedId={selectedProjectId}
+          sessions={sessions}
+          selectedSessionId={selectedSessionId}
+          onSelectProject={handleSelectProject}
+          onSelectSession={handleSelectSession}
+          onNewSession={handleNewSession}
+          onDeleteSession={handleDeleteSession}
+          onAddProject={handleAddProject}
+          onEditProject={handleEditProject}
+          onDeleteProject={handleDeleteProject}
+        />
+      </div>
+
+      {/* ── Main area ── */}
+      <div className="flex flex-col flex-1 min-w-0">
+        {/* Header */}
+        <Header
+          projectName={selectedProject?.name || ''}
+          connected={connected}
+          model="Claude"
+          onToggleSidebar={handleToggleSidebar}
+        />
+
+        {/* Error banner */}
+        {error && (
+          <div className="px-4 py-2 shrink-0">
+            <div
+              className="p-3 rounded-xl text-sm"
+              style={{
+                backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                color: '#dc2626',
+                border: '1px solid rgba(239, 68, 68, 0.2)',
+              }}
+            >
+              {error}
+              <button
+                onClick={() => setError(null)}
+                className="ml-2 underline opacity-70 hover:opacity-100 transition-opacity"
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Content area: EmptyState or MessageList */}
+        {messages.length === 0 ? (
+          <EmptyState onQuickAction={handleQuickAction} />
+        ) : (
+          <MessageList messages={messages} />
+        )}
+
+        {/* Input bar */}
+        <div
+          ref={inputBarRef}
+          className="sticky bottom-0 shrink-0 input-bar-safe"
+          style={{
+            backgroundColor: 'var(--bg-primary)',
+            borderTop: '1px solid var(--border)',
+          }}
+        >
+          <form
+            onSubmit={handleSubmit}
+            className="max-w-3xl mx-auto px-4 py-3 sm:py-4"
           >
-            {isLoading ? 'Sending...' : 'Send'}
-          </button>
+            <div className="relative flex items-end">
+              {/* Command palette popover */}
+              {paletteVisible && (
+                <CommandPalette
+                  input={input}
+                  cursorPos={cursorPos}
+                  cwd={selectedProject?.path}
+                  onSelect={(replacement: string) => {
+                    const trigger = parseTrigger(input, cursorPos);
+                    if (trigger.type === null) {
+                      setPaletteVisible(false);
+                      return;
+                    }
+                    // Find the start of the trigger in the text before cursor
+                    const textBeforeCursor = input.slice(0, cursorPos);
+                    const lastNewline = textBeforeCursor.lastIndexOf('\n');
+                    const lineBeforeCursor = textBeforeCursor.slice(lastNewline + 1);
+
+                    let triggerStartInLine = -1;
+                    if (trigger.type === 'command') {
+                      if (lineBeforeCursor.startsWith('/')) {
+                        triggerStartInLine = 0;
+                      } else {
+                        const lastSlash = lineBeforeCursor.lastIndexOf('/');
+                        if (lastSlash > 0 && lineBeforeCursor[lastSlash - 1] === ' ') {
+                          triggerStartInLine = lastSlash;
+                        }
+                      }
+                    } else if (trigger.type === 'file' || trigger.type === 'url') {
+                      const atIndex = lineBeforeCursor.lastIndexOf('@');
+                      if (atIndex >= 0) {
+                        triggerStartInLine = atIndex;
+                      }
+                    }
+
+                    if (triggerStartInLine < 0) {
+                      setPaletteVisible(false);
+                      return;
+                    }
+
+                    const triggerStartInInput = lastNewline + 1 + triggerStartInLine;
+                    const newText =
+                      input.slice(0, triggerStartInInput) +
+                      replacement +
+                      input.slice(cursorPos);
+
+                    setInput(newText);
+                    setPaletteVisible(false);
+
+                    // Restore focus to textarea
+                    requestAnimationFrame(() => {
+                      const textarea = textareaRef.current;
+                      if (textarea) {
+                        const newCursorPos = triggerStartInInput + replacement.length;
+                        textarea.focus();
+                        textarea.setSelectionRange(newCursorPos, newCursorPos);
+                        adjustTextareaHeight();
+                      }
+                    });
+                  }}
+                  onClose={() => {
+                    setPaletteVisible(false);
+                  }}
+                />
+              )}
+
+              {/* Textarea */}
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(e) => {
+                  setInput(e.target.value);
+                  setCursorPos(e.target.selectionStart ?? e.target.value.length);
+                  adjustTextareaHeight();
+                  const trigger = parseTrigger(e.target.value, e.target.selectionStart ?? e.target.value.length);
+                  setPaletteVisible(trigger.type !== null);
+                }}
+                onKeyDown={(e: KeyboardEvent<HTMLTextAreaElement>) => {
+                  if (e.key === 'Escape' && paletteVisible) {
+                    e.preventDefault();
+                    setPaletteVisible(false);
+                    return;
+                  }
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    if (paletteVisible) {
+                      // Let CommandPalette handle Enter for selection
+                      return;
+                    }
+                    e.preventDefault();
+                    handleSubmit(e);
+                  }
+                }}
+                placeholder="输入消息，或使用 / 触发命令..."
+                disabled={isLoading}
+                rows={1}
+                className="
+                  flex-1 resize-none text-base px-4 py-3
+                  rounded-2xl
+                  input-focus-ring
+                  outline-none
+                  disabled:opacity-50
+                  overflow-y-hidden
+                "
+                style={{
+                  maxHeight: '120px',
+                  backgroundColor: 'var(--bg-secondary)',
+                  border: '1px solid var(--border)',
+                  color: 'var(--text-primary)',
+                }}
+              />
+
+              {/* Circular send button */}
+              <button
+                type="submit"
+                disabled={isLoading || !input.trim()}
+                className="
+                  ml-2 shrink-0 w-10 h-10
+                  flex items-center justify-center
+                  rounded-full
+                  transition-all duration-100
+                  disabled:opacity-40 disabled:cursor-not-allowed
+                  hover:scale-105 active:scale-95
+                  focus:outline-none focus-visible:ring-2
+                "
+                style={{
+                  backgroundColor: (isLoading || !input.trim()) ? 'var(--bg-secondary)' : 'var(--bg-user-bubble)',
+                  /* @ts-expect-error CSS custom property */
+                  '--tw-ring-color': 'var(--accent)',
+                }}
+                aria-label="发送消息"
+              >
+                {/* Arrow up icon */}
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke={isLoading || !input.trim() ? 'var(--text-secondary)' : '#ffffff'}
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <line x1="12" y1="19" x2="12" y2="5" />
+                  <polyline points="5 12 12 5 19 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Hint text */}
+            <div
+              className="mt-1.5 text-center text-xs"
+              style={{ color: 'var(--text-secondary)', opacity: 0.7 }}
+            >
+              使用 / 触发命令 · 使用 @ 引用文件
+            </div>
+          </form>
         </div>
-      </form>
+      </div>
+
+      {/* ── Add/Edit Project Modal ── */}
+      <AddProjectModal
+        open={modalOpen}
+        project={editingProject}
+        onClose={() => {
+          setModalOpen(false);
+          setEditingProject(undefined);
+        }}
+        onSave={handleModalSave}
+      />
     </div>
   );
 }

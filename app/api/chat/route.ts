@@ -1,15 +1,79 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
+import { readFileSync, statSync } from 'fs';
+import { join, isAbsolute } from 'path';
 import { createRun, addEvent, setRunStatus, getRunCount } from '@/lib/runs';
 import { createClaudeStreamHandler } from '@/lib/claude-stream';
 import { getEnvConfig } from '@/lib/env';
 import { ChatRequest, ChatResponse } from '@/lib/types';
 
+const MAX_FILE_SIZE = 50 * 1024; // 50KB
+
+/**
+ * Parse @file and @url references in message and append their content.
+ */
+async function resolveReferences(message: string, workingDir: string): Promise<string> {
+  const fileRefs: { path: string }[] = [];
+  const urlRefs: { url: string }[] = [];
+
+  // Match @file <path> and @url <url> patterns
+  const fileRegex = /@file\s+(\S+)/g;
+  const urlRegex = /@url\s+(\S+)/g;
+
+  let match;
+  while ((match = fileRegex.exec(message)) !== null) {
+    fileRefs.push({ path: match[1] });
+  }
+  while ((match = urlRegex.exec(message)) !== null) {
+    urlRefs.push({ url: match[1] });
+  }
+
+  if (fileRefs.length === 0 && urlRefs.length === 0) {
+    return message;
+  }
+
+  let appended = '\n\n';
+
+  for (const ref of fileRefs) {
+    try {
+      const filePath = isAbsolute(ref.path) ? ref.path : join(workingDir, ref.path);
+      const stat = statSync(filePath);
+      let content = readFileSync(filePath, 'utf-8');
+      if (stat.size > MAX_FILE_SIZE) {
+        content = content.slice(0, MAX_FILE_SIZE) + '\n[truncated - file exceeds 50KB]';
+      }
+      appended += `<file path="${ref.path}">\n${content}\n</file>\n\n`;
+    } catch (err) {
+      appended += `<file path="${ref.path}">\n[Error: file not found or unreadable]\n</file>\n\n`;
+      console.error(`[chat] @file error for ${ref.path}:`, err);
+    }
+  }
+
+  for (const ref of urlRefs) {
+    try {
+      const response = await fetch(ref.url, { signal: AbortSignal.timeout(10000) });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const content = await response.text();
+      const truncated = content.length > MAX_FILE_SIZE
+        ? content.slice(0, MAX_FILE_SIZE) + '\n[truncated - content exceeds 50KB]'
+        : content;
+      appended += `<url href="${ref.url}">\n${truncated}\n</url>\n\n`;
+    } catch (err) {
+      appended += `<url href="${ref.url}">\n[URL 无法访问: ${(err as Error).message}]\n</url>\n\n`;
+      console.error(`[chat] @url error for ${ref.url}:`, err);
+    }
+  }
+
+  return message + appended;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body: ChatRequest = await request.json();
-    const { message, cwd, model } = body;
+    const { message, cwd, model, claudeSessionId } = body;
 
     if (!message?.trim()) {
       return NextResponse.json(
@@ -19,6 +83,10 @@ export async function POST(request: NextRequest) {
     }
 
     const config = getEnvConfig();
+    const workingDir = cwd || config.defaultCwd;
+
+    // Resolve @file and @url references
+    const resolvedMessage = await resolveReferences(message, workingDir);
 
     // Check if CLI exists
     try {
@@ -41,7 +109,6 @@ export async function POST(request: NextRequest) {
     const runId = randomUUID();
     const run = createRun(runId);
     console.log(`[chat] Created run ${runId}, total runs: ${getRunCount()}`);
-    const workingDir = cwd || config.defaultCwd;
     const effectiveModel = model || config.defaultModel;
 
     // Build Claude CLI arguments
@@ -54,8 +121,13 @@ export async function POST(request: NextRequest) {
       '--model', effectiveModel,
     ];
 
+    // Resume an existing Claude session if we have a session ID
+    if (claudeSessionId) {
+      args.push('--resume', claudeSessionId);
+    }
+
     // Add prompt as positional argument (required for --print mode)
-    args.push(message);
+    args.push(resolvedMessage);
 
     // Resolve working directory to absolute path
     const resolvedCwd = workingDir.startsWith('.')

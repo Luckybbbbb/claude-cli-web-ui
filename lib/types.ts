@@ -30,6 +30,7 @@ export interface ChatRequest {
   message: string;
   cwd?: string;
   model?: string;
+  claudeSessionId?: string;
 }
 
 export interface ChatResponse {
