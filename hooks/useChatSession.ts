@@ -193,7 +193,6 @@ export function useChatSession(opts: UseChatSessionOptions) {
       readerRef.current = reader;
       const decoder = new TextDecoder();
       let buffer = '';
-      let agentEventCount = 0;
 
       const processStream = async () => {
         try {
@@ -214,8 +213,6 @@ export function useChatSession(opts: UseChatSessionOptions) {
                   const data = JSON.parse(line.substring(5).trim());
 
                   if (currentEvent === 'agent') {
-                    agentEventCount++;
-
                     const agentUpdater = (msg: Message) => ({
                       ...msg,
                       events: [...(msg.events || []), data],
@@ -230,15 +227,6 @@ export function useChatSession(opts: UseChatSessionOptions) {
                       updateBgMessage(streamContext.activeSessionId, agentUpdater);
                     } else {
                       updateLastAssistantMessage(agentUpdater);
-                    }
-
-                    // Incremental persistence: save every 10 agent events
-                    if (agentEventCount % 10 === 0 && sessionId) {
-                      fetch('/api/sessions', {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ id: sessionId, messages: messagesRef.current }),
-                      }).catch(() => {});
                     }
 
                     if (data.sessionId) {
@@ -309,7 +297,7 @@ export function useChatSession(opts: UseChatSessionOptions) {
             fetch('/api/sessions', {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ id: sessionId, title }),
+              body: JSON.stringify({ id: sessionId, messages: currentMsgs, title }),
             }).catch(() => {});
             if (selectedProjectId) {
               opts.onSessionsRefresh(selectedProjectId);
@@ -366,17 +354,12 @@ export function useChatSession(opts: UseChatSessionOptions) {
 
     cancelStream();
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/history`);
+      const res = await fetch(`/api/sessions/${sessionId}`);
       if (!res.ok) return;
-      const { messages: historyMessages } = await res.json();
+      const { session } = await res.json();
       setSelectedSessionId(sessionId);
-      setMessages(historyMessages || []);
-      // Load claudeSessionId from session metadata
-      const metaRes = await fetch(`/api/sessions/${sessionId}`);
-      if (metaRes.ok) {
-        const { session } = await metaRes.json();
-        setClaudeSessionId(session.claudeSessionId || null);
-      }
+      setClaudeSessionId(session.claudeSessionId || null);
+      setMessages(session.messages || []);
       setIsLoading(false);
     } catch (err) {
       console.error('Failed to load session:', err);
