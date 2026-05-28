@@ -6,14 +6,15 @@
 ### 核心概念
 - **Claude CLI Web UI**: 基于 Next.js 14 App Router 的浏览器前端，通过 spawn Claude CLI 子进程实现 Web 对话
 - **stream-json 双向协议**: Claude CLI 通过 --output-format stream-json 输出 JSONL，通过 --input-format stream-json 接收 stdin JSONL，实现 AskUserQuestion 等交互式工具的双向通信
-- **后台进程管理**: 切换项目时将活跃 Claude CLI 进程移入后台，会话列表实时显示运行状态
-- **树形文件选择器**: 懒加载目录树的文件浏览器，独立确认按钮选择文件
+- **Hook 层架构**: 状态管理从巨型 ChatPanel 抽取为 useChatSession + useProjectList + useSessionList + useBreakpoint 四个 Hook，桌面/平板/移动端布局共享
+- **响应式布局**: useBreakpoint 断点检测驱动三种布局（MobileLayout / TabletLayout / ChatPanel），page.tsx 入口路由分发
 
 ### 关键数据结构
 - `AgentEvent`: 联合类型（status/text_delta/thinking_delta/tool_use/tool_result/usage/turn_end/error/raw）
 - `RunState`: 运行状态（id/status/events/child process/SSE clients/pendingHostAnswers/stdinOpen），存储在 globalThis Map 中
 - `Session`: 会话数据（id, projectId, title, cwd, claudeSessionId, messages[], timestamps），JSON 文件持久化
 - `BackgroundRun`: 后台运行状态（sessionId, projectId, runId, reader, messages, abortController, streamContext）
+- `BreakpointState`: 响应式断点状态（breakpoint: mobile/tablet/desktop, isMobile/isTablet/isDesktop 布尔）
 - `Question`: 交互式问答数据（question, header, options, multiSelect），AskUserQuestion 工具的输入模型
 - `TreeNode`: 树形文件节点（name, path, type, children?, loaded?, expanded?）
 
@@ -21,11 +22,12 @@
 - **对话流程**: 用户输入 -> POST /api/chat -> spawn Claude CLI (--print --output-format stream-json --input-format stream-json) -> stdin 写入 user message JSONL -> SSE 流式事件 -> UI 实时渲染 -> 会话持久化
 - **AskUserQuestion 流程**: Claude 返回 tool_use(AskUserQuestion) -> pendingHostAnswers 追踪 -> QuestionCard 渲染选项 -> 用户选择 -> POST /api/runs/{id}/tool-result -> stdin 写入 tool_result JSONL -> Claude 继续生成
 - **后台进程流程**: 切换项目 -> 活跃流移入 backgroundRunsRef Map -> bgVersion 触发会话列表状态同步 -> 恢复时从 Map 取回前台
+- **响应式路由**: page.tsx 使用 useBreakpoint -> mobile 渲染 MobileLayout（三 Tab）-> tablet 渲染 TabletLayout（抽屉侧边栏）-> desktop 渲染 ChatPanel
 
 ### 与其他系统的交互
 - **Claude CLI**: 通过 child_process.spawn 调用，--input-format stream-json 启用 stdin/stdout 双向 JSONL 通信，--resume 支持会话续接
 - **文件系统**: 树形懒加载扫描项目目录、递归扫描文件夹引用、会话 JSON 持久化
-- **LAN 网络**: 绑定 0.0.0.0 + 自动分配端口，支持局域网访问
+- **响应式布局**: useBreakpoint 驱动三种布局（MobileLayout/TabletLayout/ChatPanel），Hook 层共享状态逻辑
 <!-- OVERVIEW_END -->
 
 ---
@@ -279,28 +281,117 @@ interface QuestionOption {
 - QuestionCard 支持单选（radio）和多选（checkbox）模式
 - 答案格式：多问题以换行分隔，多选以逗号分隔
 
-### 5. UI 组件系统 (UI Components)
+### 5. Hook 层架构 (Hook Layer)
+
+从巨型 ChatPanel (~1050 行) 中抽取的四个自定义 Hook，实现状态逻辑与 UI 的分离。桌面/平板/移动端布局共享同一套 Hook 层。
+
+**核心文件**:
+- `hooks/useChatSession.ts` (453 行) -- 聊天会话状态管理
+- `hooks/useProjectList.ts` (180 行) -- 项目列表状态管理
+- `hooks/useSessionList.ts` (88 行) -- 会话列表状态管理
+- `hooks/useBreakpoint.ts` (55 行) -- 响应式断点检测
+
+**Hook 依赖关系**:
+```
+page.tsx
+  +-- useBreakpoint() -> 断点分发
+  +-- [MobileLayout | TabletLayout | ChatPanel]
+        +-- useProjectList(backgroundRunsRef, onBgVersionBump, ...)
+        +-- useSessionList(backgroundRunsRef, onBgVersionBump)
+        +-- useChatSession(backgroundRunsRef, bgVersion, ...)
+```
+
+**跨 Hook 协调机制**:
+- `backgroundRunsRef`: Map<sessionId, BackgroundRun>，在三个 Hook 间共享引用
+- `bgVersion`: useState 计数器，每次后台 Map 变更时 +1，触发 useEffect 同步会话列表 status
+- `onBgVersionBump`: 递增 bgVersion 的回调，传入各 Hook
+- `onSessionsRefresh`: 刷新会话列表的回调，useChatSession 完成对话后调用
+- `onCancelStream` / `onResetMessages`: useProjectList 删除/切换项目时需要调用 useChatSession 的方法
+
+**useChatSession 接口**:
+- 状态: messages, isLoading, error, connected, selectedSessionId, claudeSessionId
+- Refs: readerRef, messagesRef, currentRunIdRef, streamContextRef
+- 方法: sendMessage, selectSession, moveCurrentToBackground, handleAnswer, cancelStream, resetConversation
+
+**useBreakpoint 断点规则**:
+- mobile: < 768px（window.matchMedia('(min-width: 768px)' 不匹配）
+- tablet: 768px ~ 1023px（768 匹配但 1024 不匹配）
+- desktop: >= 1024px
+- 150ms 防抖更新，SSR 默认 desktop
+
+### 6. 响应式布局系统 (Responsive Layout)
+
+基于 useBreakpoint 的三种布局适配方案，共享 Hook 层实现状态逻辑复用。
+
+**入口路由** (app/page.tsx):
+```typescript
+const { isMobile, isTablet } = useBreakpoint();
+if (isMobile) return <MobileLayout />;
+if (isTablet) return <TabletLayout />;
+return <ChatPanel />;
+```
+
+**移动端布局** (components/mobile/):
+
+MobileLayout 管理三个 Tab 视图：
+- **MobileChatView**: 对话视图，包含 Header + MessageList/EmptyState + CommandPalette + 输入区域
+- **MobileHistoryView**: 历史视图，项目卡片列表 + 会话列表 + 添加项目/新建会话
+- **MobileSettingsView**: 设置视图（基础版），项目信息展示
+
+BottomNavBar:
+- 底部固定导航栏，三个 Tab 图标（chat/history/settings）
+- 激活态蓝色 (#6495ed)
+- 安全区域适配 env(safe-area-inset-bottom)
+- 输入时可隐藏
+
+**平板端布局** (components/tablet/):
+
+TabletLayout:
+- 抽屉式侧边栏从左侧滑入（手势支持关闭）
+- 复用现有 Sidebar、Header、MessageList、CommandPalette 等组件
+- 抽屉开关通过 Header 汉堡菜单控制
+- 侧边栏展开时背景遮罩
+
+**桌面端布局**:
+
+ChatPanel（重构后 ~270 行）:
+- 纯 UI 编排层，所有状态管理委托给 Hook 层
+- 仅保留 UI 状态：input、cursorPos、paletteVisible
+- 重新导出 BackgroundRun 和 Message 类型
+
+### 7. UI 组件系统 (UI Components)
 
 基于 Kimi 风格黑白灰设计系统。
 
 **组件树**:
 ```
-ChatPanel (状态管理 + 会话持久化)
-  +-- Sidebar (可收缩侧边栏，树形结构)
-  |     +-- 项目节点（可展开/折叠）
-  |     |     +-- 会话列表（标题 + 消息数 + 相对时间）
-  |     |     +-- 新建会话按钮
-  |     +-- AddProjectModal (模态框)
-  +-- Header (顶栏)
-  |     +-- 汉堡菜单 + 项目名 + 模型 chip + 状态灯
-  +-- EmptyState (空状态) / MessageList (消息列表)
-  |     +-- AssistantMessage (助手消息渲染)
-  |     |     +-- ThinkingBlock (思考块)
-  |     |     +-- ToolCard (工具卡片)
-  |     |     +-- QuestionCard (交互式问答卡片，AskUserQuestion 专用)
-  |     |     +-- ReactMarkdown (文本)
-  +-- CommandPalette (命令面板, / 和 @ 触发，cwd 感知)
-  +-- 输入区域 (textarea + 发送按钮)
+page.tsx (useBreakpoint 断点分发)
+  +-- MobileLayout (mobile, 三 Tab 导航)
+  |     +-- BottomNavBar
+  |     +-- MobileChatView (Header + MessageList/EmptyState + CommandPalette)
+  |     +-- MobileHistoryView (项目卡片 + 会话列表)
+  |     +-- MobileSettingsView (设置页)
+  +-- TabletLayout (tablet, 抽屉式侧边栏)
+  |     +-- Sidebar (抽屉模式)
+  |     +-- Header (汉堡菜单开关抽屉)
+  |     +-- MessageList / EmptyState
+  |     +-- CommandPalette
+  +-- ChatPanel (desktop, 传统布局)
+        +-- Sidebar (可收缩侧边栏，树形结构)
+        |     +-- 项目节点（可展开/折叠）
+        |     |     +-- 会话列表（标题 + 消息数 + 相对时间）
+        |     |     +-- 新建会话按钮
+        |     +-- AddProjectModal (模态框)
+        +-- Header (顶栏)
+        |     +-- 汉堡菜单 + 项目名 + 模型 chip + 状态灯
+        +-- EmptyState (空状态) / MessageList (消息列表)
+        |     +-- AssistantMessage (助手消息渲染)
+        |     |     +-- ThinkingBlock (思考块)
+        |     |     +-- ToolCard (工具卡片)
+        |     |     +-- QuestionCard (交互式问答卡片，AskUserQuestion 专用)
+        |     |     +-- ReactMarkdown (文本)
+        +-- CommandPalette (命令面板, / 和 @ 触发，cwd 感知)
+        +-- 输入区域 (textarea + 发送按钮)
 ```
 
 **设计系统 (globals.css)**:
@@ -309,7 +400,7 @@ ChatPanel (状态管理 + 会话持久化)
 - 动画：fadeIn, slideUp, messageAppear
 - 安全区域：`env(safe-area-inset-bottom)` 移动端适配
 
-### 6. 环境配置 (Configuration)
+### 8. 环境配置 (Configuration)
 
 通过 `lib/env.ts` 管理：
 - `CLAUDE_BIN`: Claude CLI 可执行文件路径（默认 `claude`）

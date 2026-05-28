@@ -6,12 +6,13 @@
 ### 问题分类
 - **Claude CLI 集成问题**: stream-json 格式兼容性、进程管理、--resume 会话续接、stdin 双向通信
 - **SSE 流通信**: 重复发送、连接管理、turn_end 时序、前台/后台分发
-- **命令发现系统**: 插件目录结构差异、frontmatter 解析
-- **状态管理**: React 不可变更新、竞态条件、闭包过期
+- **命令发现系统**: 插件目录结构差异、frontmatter 解析、命令前缀重复
+- **状态管理**: React 不可变更新、竞态条件、闭包过期、useEffect 无限重渲染
 - **文件引用与安全**: @file/@url 内容注入、截断策略、超时控制、路径遍历防护
 - **数据持久化**: 会话淘汰策略、跨项目搜索
 - **后台进程管理**: 流状态保存、恢复、清理
 - **交互式问答**: AskUserQuestion 双向通信、stdin 生命周期管理、shell 转义
+- **移动端适配**: 触摸设备交互、响应式断点、Hook 层抽取与多布局共享
 
 ### 关键经验
 - Claude CLI 的 stream-json 格式存在新旧版本差异，需要同时兼容有/无 --include-partial-messages 的情况
@@ -22,6 +23,10 @@
 - 切换上下文时不应中断进行中的异步操作，应将其"移入后台"而非取消
 - 通过 --input-format stream-json 启用 stdin 双向通信，prompt 以 JSONL 格式写入避免 shell 转义问题
 - stdin 生命周期管理需要配合 pendingHostAnswers 追踪机制，确保所有交互完成后才关闭
+- 命令发现返回的数据可能已包含完整格式（如 /plugin:skill），消费者不应二次拼接
+- useEffect 依赖中如果引用了 Hook 返回的对象/函数，需要使用 useRef 稳定引用避免无限重渲染
+- 移动端触摸设备不支持 hover，操作按钮应始终可见（降低透明度）而非条件渲染
+- 大型组件重构为 Hook 层时，跨 Hook 状态共享使用 ref + 版本号模式
 
 ### 预防建议
 - 始终使用防御性解析处理 JSONL 输入
@@ -31,6 +36,8 @@
 - 文件 API 必须包含路径遍历防护（拒绝 ".." 路径）
 - 使用局部变量捕获当前值避免闭包引用过期
 - 向外部进程传递用户内容时，使用 JSONL/结构化格式替代命令行参数，避免 shell 转义问题
+- 消费数据前确认数据格式，避免与上游生产者的格式约定冲突导致重复处理
+- 从巨型组件抽取 Hook 时，确保跨 Hook 回调使用 useCallback + useRef 稳定引用
 <!-- OVERVIEW_END -->
 
 ---
@@ -199,3 +206,35 @@
 - **根本原因**: tool_result 在 Claude API 语义中是对特定 tool_use 的回复，不是新的用户消息。通过新消息发送答案会导致 Claude 将其视为独立输入而非工具调用的结果，可能引发重复调用或上下文混乱。
 - **解决方案**: handleAnswer 改为调用 POST /api/runs/{id}/tool-result API，该 API 构建 `type: 'tool_result'` 格式的 JSONL 消息直接写入 stdin。这样 Claude CLI 能正确识别为工具调用的回复，而非新的用户输入。
 - **预防建议**: 在实现交互式工具回传时，必须使用工具原生的回传机制（tool_result），而非通过用户消息通道变通传递。保持与 Claude API 的语义一致性。
+
+## 命令系统
+
+### 22. Plugin 命令前缀重复拼接
+
+- **问题描述**: 在 CommandPalette 中选择 plugin skill 命令时，插入的文本出现前缀重复，如 `/bughunt-lite:bughunt-lite` 而非 `/bughunt-lite`。
+- **根本原因**: command-discovery.ts 的 `discoverPluginCommands` 函数已经返回完整的 `/plugin-name:skill-name` 格式作为 item.name。但 CommandPalette 的 onSelect 处理函数又做了一次前缀拼接：`/${item.plugin}:${skillPart}`，导致双重拼接。
+- **解决方案**: CommandPalette onSelect 中移除前缀拼接逻辑，直接使用 `value`（即 item.name）作为 replacement。注释说明 item.name 已包含完整格式。
+- **预防建议**: 在数据管道中，确认上游生产者的输出格式后再决定消费者是否需要二次处理。当发现输出格式异常时，首先检查是否有"双重处理"——上游已格式化但下游又重复格式化。
+
+### 23. useEffect 无限重渲染（Hook 间依赖不稳定引用）
+
+- **问题描述**: 将 ChatPanel 状态管理逻辑抽取为独立 Hook 后，出现 useEffect 无限重渲染循环，导致页面卡顿甚至崩溃。
+- **根本原因**: Hook 返回的对象/函数在每次渲染时创建新引用，被其他 Hook 的 useEffect 依赖引用后，每次渲染都触发 effect 执行，形成无限循环。特别是跨 Hook 的回调函数（如 onBgVersionBump、onCancelStream）如果不稳定，会导致下游 Hook 的 useEffect 反复触发。
+- **解决方案**: 使用 useCallback 包裹所有跨 Hook 传递的回调函数，确保引用稳定。对于需要引用其他 Hook 返回值的回调，使用 useRef 暴露引用模式——在 Hook 内部维护最新值的 ref，在 useCallback 中读取 ref 而非闭包变量。例如 `const setSessionsRef = useRef(sessionList.setSessions)` + `setSessionsRef.current = sessionList.setSessions`。
+- **预防建议**: 多 Hook 协调时，所有跨 Hook 传递的回调必须用 useCallback 包裹。如果回调内部需要读取其他 Hook 的返回值，使用 ref 间接引用而非直接引用。useEffect 依赖中不要放入对象或函数类型的 prop，除非它们经过了 useCallback/useMemo 稳定化。
+
+## 移动端适配
+
+### 24. Sidebar 操作按钮触摸设备不可见
+
+- **问题描述**: Sidebar 中的编辑/删除按钮使用 hover 状态条件渲染（`{isHovered && <buttons/>}`），在移动端触摸设备上无法触发 hover，导致按钮完全不可见，用户无法编辑项目或删除会话。
+- **根本原因**: CSS hover 伪类在触摸设备上的行为不一致——某些浏览器在 tap 后短暂保持 hover，但大多数触摸场景下 hover 不可用。条件渲染基于 isHovered 状态（onMouseEnter/onMouseLeave 驱动），触摸设备无法触发这些事件。
+- **解决方案**: 将操作按钮从条件渲染改为始终渲染 + CSS opacity 过渡。移动端（max-md:）始终保持 opacity: 0.6 可见，桌面端（md:）默认 opacity: 0，hover 时 opacity: 1。使用 Tailwind 响应式前缀实现差异化行为。
+- **预防建议**: 触摸设备交互设计不能依赖 hover 状态。操作按钮应始终可见或通过其他方式触发（如长按、滑动）。使用 CSS opacity 过渡替代条件渲染，配合响应式断点在触摸和桌面设备上采用不同的可见性策略。
+
+### 25. Hook 层抽取与多布局共享
+
+- **问题描述**: 将 ~1050 行的 ChatPanel 中的状态管理逻辑抽取为独立 Hook 时，需要在三种布局（MobileLayout / TabletLayout / ChatPanel）中共享状态，同时保持各自独立的 UI 交互。
+- **根本原因**: 之前所有状态集中在单一组件内，不存在跨组件状态共享的需求。抽取后需要解决：1) backgroundRunsRef 在三个 Hook 间共享；2) 项目/会话操作需要触发聊天 Hook 的方法；3) 各布局有不同的 UI 交互模式但需要相同的状态逻辑。
+- **解决方案**: 采用"共享 ref + 回调注入"模式。backgroundRunsRef 作为 MutableRefObject 在布局组件中创建，传入所有 Hook。跨 Hook 回调（如 onCancelStream、onResetMessages）通过 Hook 的 options 参数注入。布局组件只管理 UI 状态（input、activeTab、drawerOpen 等），所有业务逻辑委托给 Hook 层。
+- **预防建议**: 从巨型组件抽取 Hook 时，先识别"哪些状态是跨组件共享的"（如 backgroundRunsRef），"哪些是组件私有的"（如 input、paletteVisible）。共享状态通过 ref 在外层创建并注入，私有状态保留在各自的布局组件中。Hook 的 options 接口应明确区分"共享数据"（ref）和"回调通知"（callback）。

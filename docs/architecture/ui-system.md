@@ -5,7 +5,7 @@
 
 ### 核心概念
 - **Kimi 风格设计系统**: 黑白灰配色，CSS 变量驱动，支持亮色/暗色模式
-- **组件树结构**: ChatPanel 为核心状态容器，管理 Sidebar/Header/MessageList/CommandPalette 等子组件
+- **Hook 层 + 多布局**: 状态逻辑抽取为 useChatSession/useProjectList/useSessionList/useBreakpoint，三种布局共享
 - **消息渲染管线**: AgentEvent[] -> Block[]（text/thinking/tool/question）-> 对应组件渲染
 
 ### 关键数据结构
@@ -16,6 +16,7 @@
 ### 核心流程
 - **消息发送**: 输入 -> POST /api/chat -> SSE 流 -> updateLastAssistantMessage -> UI 更新
 - **命令面板**: parseTrigger 检测 / 或 @ -> CommandPalette 弹出 -> 选择替换文本
+- **响应式路由**: useBreakpoint 检测 -> MobileLayout (mobile) / TabletLayout (tablet) / ChatPanel (desktop)
 
 ### 与其他系统的交互
 - **流式通信**: 通过 fetch SSE 接收 AgentEvent，转换为渲染 Block
@@ -54,32 +55,25 @@
 
 ### 核心组件
 
-#### ChatPanel
+#### ChatPanel (Desktop Layout)
 
-状态管理核心，维护以下状态：
-- `messages: Message[]` — 对话消息列表
-- `input: string` — 输入框内容
-- `isLoading: boolean` — 是否正在等待响应
-- `projects: Project[]` — 项目列表
-- `selectedProjectId: string | null` — 当前选中项目
-- `selectedSessionId: string | null` — 当前选中会话
-- `claudeSessionId: string | null` — Claude CLI 会话 ID（用于 --resume）
-- `sidebarCollapsed: boolean` — 侧边栏折叠状态
-- `paletteVisible: boolean` — 命令面板可见性
-- `connected: boolean` — 连接状态
-- `bgVersion: number` — 后台进程变更版本号（触发会话列表状态同步）
+桌面端布局组件（~270 行），纯 UI 编排层。状态管理委托给 Hook 层：
+- `messages: Message[]` — 对话消息列表（来自 useChatSession）
+- `input: string` — 输入框内容（本地 UI 状态）
+- `isLoading: boolean` — 是否正在等待响应（来自 useChatSession）
+- `projects: Project[]` — 项目列表（来自 useProjectList）
+- `selectedProjectId: string | null` — 当前选中项目（来自 useProjectList）
+- `selectedSessionId: string | null` — 当前选中会话（来自 useChatSession）
+- `claudeSessionId: string | null` — Claude CLI 会话 ID（来自 useChatSession）
+- `sidebarCollapsed: boolean` — 侧边栏折叠状态（来自 useProjectList）
+- `paletteVisible: boolean` — 命令面板可见性（本地 UI 状态）
+- `connected: boolean` — 连接状态（来自 useChatSession）
+- `bgVersion: number` — 后台进程变更版本号（本地状态）
 
-**Refs**:
-- `backgroundRunsRef: Map<string, BackgroundRun>` — 后台运行管理
-- `currentRunIdRef: string | null` — 当前前台 runId
-- `streamContextRef: StreamContext | null` — 当前流上下文（前台/后台标记）
-
-**关键行为**:
-- 切换项目时：活跃流移入后台（backgroundRunsRef），不取消
-- 发送消息时：若无 selectedSessionId 则自动创建会话
-- 发送消息时携带 `selectedProject?.path` 作为 `cwd`
-- 侧边栏状态和项目 ID 通过 localStorage 持久化
-- 组件卸载时取消所有后台进程
+**Hook 层协调**:
+- `backgroundRunsRef` 和 `bgVersion` 在 useChatSession/useProjectList/useSessionList 间共享
+- 项目切换通过 useProjectList.selectProject 触发，内部调用 useChatSession.moveCurrentToBackground
+- 发送消息携带 `selectedProject?.path` 作为 `cwd`
 
 #### MessageList
 
@@ -168,9 +162,37 @@ AskUserQuestion 工具的专用交互卡片组件（228 行）。
 - 输入验证：非空检查
 - 点击遮罩关闭 + Escape 关闭
 
-### 移动端适配
+### 移动端适配与响应式布局
+
+#### useBreakpoint Hook
+
+响应式断点检测，150ms 防抖：
+- **mobile** (< 768px): 渲染 MobileLayout
+- **tablet** (768px ~ 1023px): 渲染 TabletLayout
+- **desktop** (>= 1024px): 渲染 ChatPanel
+
+使用 `window.matchMedia` 监听 `(min-width: 768px)` 和 `(min-width: 1024px)` 两个断点变化。
+
+#### MobileLayout (移动端)
+
+三 Tab 导航布局，共享 Hook 层：
+- **MobileChatView**: 对话视图，包含 Header + MessageList/EmptyState + CommandPalette + 输入区域
+- **MobileHistoryView**: 历史视图，项目卡片列表（名称+路径+操作按钮）+ 会话列表（标题+消息数+相对时间+运行状态）
+- **MobileSettingsView**: 设置视图（基础版），展示项目信息和模型信息
+- **BottomNavBar**: 底部固定导航栏，SVG 图标，激活态蓝色 (#6495ed)，安全区域适配
+
+#### TabletLayout (平板端)
+
+抽屉式侧边栏布局：
+- 复用现有 Sidebar、Header、MessageList、CommandPalette 等组件
+- 侧边栏从左侧滑入，背景遮罩
+- 手势支持关闭侧边栏
+- 汉堡菜单控制抽屉开关
+
+#### 基础移动端适配
 
 - `viewport` meta: width=device-width, initial-scale=1, maximumScale=5
 - `visualViewport` 监听：虚拟键盘弹出时调整输入框位置
 - 安全区域：`env(safe-area-inset-bottom)` 处理刘海屏
-- 响应式布局：sm: 前缀适配不同屏幕尺寸
+- 响应式布局：sm: / md: / lg: 前缀适配不同屏幕尺寸
+- Sidebar 操作按钮触摸兼容：移动端常显（opacity: 0.6），桌面端 hover 触发

@@ -34,7 +34,7 @@ claude-cli-web-ui/
   components/
     AddProjectModal.tsx          -- 添加/编辑项目模态框
     AssistantMessage.tsx         -- 助手消息渲染（文本/思考/工具）
-    ChatPanel.tsx                -- 主聊天面板（状态管理 + 会话持久化）
+    ChatPanel.tsx                -- 桌面端聊天面板（UI 编排层，~270 行）
     CommandPalette.tsx           -- 命令面板（/ 和 @ 触发，cwd 感知）
     EmptyState.tsx               -- 空状态首页（快捷操作）
     Header.tsx                   -- 顶栏（项目名 + 连接状态 + 模型）
@@ -44,6 +44,19 @@ claude-cli-web-ui/
     Sidebar.tsx                  -- 可收缩侧边栏（项目列表 + 会话列表）
     ThinkingBlock.tsx            -- 思考块（淡黄色 + 折叠）
     ToolCard.tsx                 -- 工具卡片（左侧色条 + 展开）
+    mobile/                      -- 移动端组件
+      BottomNavBar.tsx           -- 底部三 Tab 导航栏
+      MobileChatView.tsx         -- 移动端对话视图
+      MobileHistoryView.tsx      -- 移动端历史视图（项目 + 会话列表）
+      MobileLayout.tsx           -- 移动端顶层布局（Tab 管理）
+      MobileSettingsView.tsx     -- 移动端设置视图
+    tablet/                      -- 平板端组件
+      TabletLayout.tsx           -- 平板端布局（抽屉式侧边栏 + 手势）
+  hooks/                         -- 共享 Hook 层
+    useBreakpoint.ts             -- 响应式断点检测（mobile/tablet/desktop）
+    useChatSession.ts            -- 聊天会话状态管理（SSE 流 + 后台进程）
+    useProjectList.ts            -- 项目列表状态管理（CRUD + 持久化）
+    useSessionList.ts            -- 会话列表状态管理（CRUD + 状态同步）
   lib/
     claude-stream.ts             -- Claude CLI stream-json 解析器
     command-discovery.ts         -- 文件系统命令扫描（5 分钟缓存）
@@ -60,6 +73,22 @@ claude-cli-web-ui/
 ```
 
 ## 核心架构
+
+### Hook 层架构
+
+- 状态管理从 ChatPanel (~1050 行) 抽取为四个独立 Hook
+- **useChatSession**: 聊天会话状态（messages, isLoading, SSE 流处理, 后台进程, handleAnswer）
+- **useProjectList**: 项目管理状态（projects, CRUD, sidebarCollapsed, localStorage 持久化）
+- **useSessionList**: 会话列表状态（sessions, CRUD, 后台状态同步）
+- **useBreakpoint**: 响应式断点检测（mobile < 768px / tablet 768-1024px / desktop >= 1024px）
+- 跨 Hook 协调通过共享 backgroundRunsRef (Map) + bgVersion (计数器) + 回调注入
+
+### 响应式布局
+
+- page.tsx 使用 useBreakpoint 检测断点，分发到三种布局
+- **MobileLayout**: 三 Tab 导航（chat/history/settings），BottomNavBar + 三个视图组件
+- **TabletLayout**: 抽屉式侧边栏 + 手势支持，复用现有 Sidebar/Header/MessageList
+- **ChatPanel**: 桌面端传统布局（~270 行纯 UI 编排层），所有状态管理委托给 Hook 层
 
 ### 数据流
 
@@ -147,13 +176,13 @@ pnpm test    # 运行测试
 | CLAUDE_BIN | `claude` | Claude CLI 可执行文件路径 |
 | DEFAULT_MODEL | `claude-sonnet-4-6` | 默认模型 |
 | DEFAULT_CWD | `process.cwd()` | 默认工作目录 |
-| PORT | `0`（自动） | 服务端口（绑定 0.0.0.0 支持 LAN 访问） |
+| PORT | `6523` | 服务端口（绑定 0.0.0.0 支持 LAN 访问） |
 
 ## 文档版本追踪
 
-- **上次文档更新版本**: d989852
-- **当前文档更新版本**: 7b697a5
-- **更新日期**: 2026-05-27
+- **上次文档更新版本**: 7b697a5
+- **当前文档更新版本**: 1cba65f
+- **更新日期**: 2026-05-28
 
 ## 项目文档索引
 

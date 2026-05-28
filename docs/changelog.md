@@ -4,7 +4,7 @@
 ## 概览
 
 ### 版本范围
-- 初始版本 81ddbf4 到当前版本 7b697a5，涵盖项目从零搭建到功能完善的全过程
+- 初始版本 81ddbf4 到当前版本 1cba65f，涵盖项目从零搭建到功能完善的全过程
 
 ### 变更模块
 - **核心通信**: SSE 流式通信、Claude CLI 进程管理、stream-json 解析
@@ -15,6 +15,8 @@
 - **后台进程**: 切换项目不中断 Claude CLI 进程、会话状态实时显示
 - **API 层**: 对话、命令发现、文件扫描、项目 CRUD、会话 CRUD
 - **交互式问答**: AskUserQuestion 工具支持、QuestionCard 组件、stdin JSONL 双向通信
+- **Hook 层抽取**: useChatSession、useProjectList、useSessionList、useBreakpoint
+- **响应式布局**: 移动端 BottomNavBar + MobileLayout、平板端 TabletLayout 抽屉式侧边栏
 
 ### 关键变更点
 - 从基础 ChatPanel + SSE 演进为完整的命令面板 + 项目管理 + 侧边栏架构
@@ -26,6 +28,11 @@
 - AskUserQuestion 交互式支持：通过 --input-format stream-json 实现 stdin/stdout 双向通信
 - stdin 改为 JSONL 格式写入并保持打开，解决了 shell 转义问题
 - QuestionCard 组件实现单选/多选交互式问答卡片
+- Hook 层抽取：ChatPanel 从 ~1050 行重构为 ~270 行纯 UI 编排层
+- 移动端响应式布局：BottomNavBar 三 Tab 导航 + MobileChatView/MobileHistoryView/MobileSettingsView
+- 平板端响应式布局：TabletLayout 抽屉式侧边栏 + 手势支持
+- useBreakpoint 响应式断点检测（mobile < 768px / tablet 768-1024px / desktop >= 1024px）
+- 修复命令面板 plugin 前缀重复 bug、Sidebar hover 按钮触摸兼容、useEffect 无限重渲染
 <!-- OVERVIEW_END -->
 
 ---
@@ -48,6 +55,8 @@
 | 29ef54a | 2026-05-27 | 设计文档 | 树形文件选择器 + 后台进程 + 自动会话设计 |
 | d989852 | 2026-05-27 | 重大迭代 | 树形文件选择器 + 后台进程管理 + 自动会话 + LAN |
 | 7b697a5 | 2026-05-27 | 交互式问答 | AskUserQuestion 交互式支持 + QuestionCard + stdin JSONL |
+| 1b7c5e3 | 2026-05-28 | 设计文档 | 移动端体验优化设计规范 |
+| 1cba65f | 2026-05-28 | 重大迭代 | Hook 层抽取 + 移动端/平板端响应式布局 + Bug 修复 |
 
 ---
 
@@ -494,3 +503,111 @@
     - 接收 `{ toolUseId, content }` 后构建 `type: 'user'` + `tool_result` JSONL 消息
     - 通过 stdin.write 写入 Claude CLI 进程
     - 从 pendingHostAnswers 中移除，无待回答时关闭 stdin
+
+### 2026-05-28: Hook 层抽取 + 响应式布局
+
+#### 模块: 设计文档
+
+- **1b7c5e3** `docs: add design spec for mobile experience optimization`
+  - docs/superpowers/specs/2026-05-28-mobile-experience-design.md
+  - 移动端体验优化的完整设计规范
+
+#### 模块: Hook 层抽取
+
+- **1cba65f** `feat: add mobile/tablet responsive layout with shared Hook layer`
+
+  - **新建** hooks/useChatSession.ts (453 行)
+    - 从 ChatPanel 中抽取所有聊天会话状态管理逻辑
+    - 维护 messages、isLoading、messageCounter、error、connected、selectedSessionId、claudeSessionId 等状态
+    - 管理 readerRef、eventSourceRef、messagesRef、currentRunIdRef、streamContextRef 等 refs
+    - 核心方法：sendMessage（含 SSE 流处理）、selectSession（含后台恢复）、moveCurrentToBackground、handleAnswer、cancelStream、resetConversation
+    - 导出 BackgroundRun、Message、StreamContext 类型
+    - 通过 UseChatSessionOptions 接口与外部 Hook 协调（backgroundRunsRef、bgVersion、onBgVersionBump、onSessionsRefresh）
+
+  - **新建** hooks/useProjectList.ts (180 行)
+    - 从 ChatPanel 中抽取项目管理状态逻辑
+    - 维护 projects、selectedProjectId、sidebarCollapsed、modalOpen、editingProject 等状态
+    - 核心方法：selectProject、addProject、editProject、deleteProject、saveProject、toggleSidebar
+    - 项目列表和选中状态通过 localStorage 持久化
+    - 删除项目时自动清理关联后台进程
+
+  - **新建** hooks/useSessionList.ts (88 行)
+    - 从 ChatPanel 中抽取会话列表管理逻辑
+    - 维护 sessions 状态
+    - 核心方法：loadSessions、createSession、refreshSessions、deleteSession、syncBgStatus
+    - 删除会话时自动清理关联后台进程
+
+  - **新建** hooks/useBreakpoint.ts (55 行)
+    - 响应式断点检测 Hook
+    - 三级断点：mobile (< 768px)、tablet (768-1024px)、desktop (>= 1024px)
+    - 使用 window.matchMedia 监听变化，150ms 防抖
+    - SSR 安全（typeof window === 'undefined' 时默认 desktop）
+
+  - **重构** components/ChatPanel.tsx
+    - 从 ~1050 行缩减为 ~270 行的纯 UI 编排层
+    - 移除所有内联的状态管理逻辑，改用 useChatSession + useProjectList + useSessionList
+    - 仅保留 UI 状态：input、cursorPos、paletteVisible
+    - 重新导出 BackgroundRun 和 Message 类型（向后兼容）
+
+#### 模块: 移动端布局
+
+  - **新建** components/mobile/BottomNavBar.tsx (82 行)
+    - 移动端底部导航栏，三个 Tab：chat（对话）、history（历史）、settings（设置）
+    - SVG 图标（ChatIcon、HistoryIcon、SettingsIcon），激活态蓝色 (#6495ed)
+    - 安全区域适配（env(safe-area-inset-bottom)）
+    - 可见性控制（输入时隐藏导航栏）
+
+  - **新建** components/mobile/MobileLayout.tsx (278 行)
+    - 移动端顶层布局组件，管理 Tab 切换
+    - 复用 useChatSession + useProjectList + useSessionList Hook 层
+    - 三个视图：MobileChatView、MobileHistoryView、MobileSettingsView
+    - 共享 backgroundRunsRef、bgVersion 等跨 Hook 状态
+
+  - **新建** components/mobile/MobileChatView.tsx (202 行)
+    - 移动端对话视图，纯 UI 组件（接收 props，不含状态管理）
+    - 包含 Header、EmptyState/MessageList、CommandPalette、输入区域
+    - visualViewport 虚拟键盘适配
+    - 安全区域底部间距
+
+  - **新建** components/mobile/MobileHistoryView.tsx (185 行)
+    - 移动端历史视图，展示项目列表和会话列表
+    - 项目卡片：名称、路径、编辑/删除操作
+    - 会话列表：标题、消息数、相对时间、运行状态指示器
+    - 添加项目按钮、新建会话按钮
+
+  - **新建** components/mobile/MobileSettingsView.tsx (132 行)
+    - 移动端设置视图（占位/基础版）
+    - 显示项目信息、模型信息
+
+#### 模块: 平板端布局
+
+  - **新建** components/tablet/TabletLayout.tsx (383 行)
+    - 平板端顶层布局组件
+    - 抽屉式侧边栏（从左侧滑入，手势支持）
+    - 复用 useChatSession + useProjectList + useSessionList Hook 层
+    - 复用现有组件：Header、Sidebar、MessageList、CommandPalette、EmptyState、AddProjectModal
+    - 抽屉开关通过 Header 汉堡菜单控制
+    - 触摸滑动手势关闭侧边栏
+
+#### 模块: 入口路由
+
+  - **更新** app/page.tsx
+    - 引入 useBreakpoint Hook，根据断点选择布局
+    - mobile -> MobileLayout，tablet -> TabletLayout，desktop -> ChatPanel
+
+#### 模块: Bug 修复
+
+  - **修复** components/CommandPalette.tsx
+    - 修复 plugin skill 命令前缀重复 bug
+    - 根因：command-discovery 已返回 `/plugin-name:skill-name` 完整格式，CommandPalette 又二次拼接前缀
+    - 修复：直接使用 item.name 作为 replacement，不再二次拼接
+
+  - **修复** components/Sidebar.tsx
+    - 修复 hover 操作按钮在触摸设备上不可见的问题
+    - 将条件渲染改为 CSS opacity 过渡，移动端始终保持可见（opacity: 0.6）
+    - 桌面端保持 hover 触发（opacity: 0 -> group-hover:opacity-100）
+
+  - **修复** lib/commands.ts
+    - parseTrigger 新增 triggerStart 返回值
+    - 标识触发字符在输入字符串中的绝对位置，便于精确替换
+    - 无触发时返回 triggerStart: -1

@@ -58,7 +58,7 @@
 - 发送格式：`event: agent\ndata: {...}\nid: {index}\n\n`
 - 客户端断连时自动从 clients Set 移除
 
-### 客户端流处理 (ChatPanel.tsx)
+### 客户端流处理 (useChatSession Hook)
 
 ```typescript
 const sseResponse = await fetch(`/api/runs/${runId}/events`);
@@ -78,6 +78,8 @@ while (true) {
 **前台/后台分发**: SSE 事件到达时，根据 `streamContext.isBackground` 决定更新路径：
 - 前台模式：调用 `updateLastAssistantMessage` 更新当前 UI 状态
 - 后台模式：调用 `updateBgMessage` 更新 BackgroundRun 中的 messages 数组
+
+**Hook 层协调**: 流处理逻辑从 ChatPanel 抽取到 `hooks/useChatSession.ts`。三种布局（MobileLayout / TabletLayout / ChatPanel）共享同一 Hook 层的流处理逻辑。
 
 **后台持久化**: 后台流完成后（status succeeded/failed/canceled），自动从 backgroundRunsRef 中取出 messages 并 PUT /api/sessions 持久化，然后从 Map 中移除。
 
