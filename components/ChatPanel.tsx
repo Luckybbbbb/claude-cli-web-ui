@@ -81,6 +81,8 @@ export function ChatPanel() {
                 setMessagesRef.current(sData.session.messages);
               }
             });
+        } else {
+          setSelectedSessionIdRef.current(null);
         }
       });
   }, [projectList.selectedProjectId]);
@@ -133,6 +135,8 @@ export function ChatPanel() {
     );
     chat.setMessages([]);
     chat.setIsLoading(false);
+    chat.setClaudeSessionId(null);
+    chat.setSelectedSessionId(null);
     projectList.selectProject(id);
   }, [chat, projectList]);
 

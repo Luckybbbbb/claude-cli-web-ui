@@ -215,12 +215,24 @@ export async function POST(request: NextRequest) {
     run.child = child;
     run.status = 'running';
 
+    // Helper to close stdin when no pending interactive answers remain
+    const tryCloseStdin = () => {
+      if (run.pendingHostAnswers.size === 0 && run.stdinOpen && child.stdin && !child.stdin.destroyed) {
+        child.stdin.end();
+        run.stdinOpen = false;
+      }
+    };
+
     // Create stream handler
     const handler = createClaudeStreamHandler((event) => {
       addEvent(run, event);
       // Track AskUserQuestion tool calls that need host-side answers
       if (event.type === 'tool_use' && event.name === 'AskUserQuestion' && typeof event.id === 'string') {
         run.pendingHostAnswers.add(event.id);
+      }
+      // Close stdin after turn_end (stop_reason received) or after usage/result (CLI finished)
+      if (event.type === 'turn_end' || event.type === 'usage') {
+        tryCloseStdin();
       }
     });
 

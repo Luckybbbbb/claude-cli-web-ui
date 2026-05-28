@@ -216,6 +216,10 @@ export function useChatSession(opts: UseChatSessionOptions) {
                     const agentUpdater = (msg: Message) => ({
                       ...msg,
                       events: [...(msg.events || []), data],
+                      // Accumulate text content from text_delta events for persistence
+                      content: data.type === 'text_delta' && typeof data.delta === 'string'
+                        ? msg.content + data.delta
+                        : msg.content,
                       status: data.type === 'turn_end'
                         ? 'succeeded'
                         : data.type === 'error'
@@ -230,7 +234,16 @@ export function useChatSession(opts: UseChatSessionOptions) {
                     }
 
                     if (data.sessionId) {
-                      setClaudeSessionId(data.sessionId);
+                      if (streamContext.isBackground) {
+                        // Only update the background run's claudeSessionId, NOT the hook state
+                        // to prevent polluting the foreground session's claudeSessionId
+                        const bgRun = opts.backgroundRunsRef.current.get(streamContext.activeSessionId);
+                        if (bgRun) {
+                          bgRun.claudeSessionId = data.sessionId;
+                        }
+                      } else {
+                        setClaudeSessionId(data.sessionId);
+                      }
                       if (sessionId) {
                         fetch('/api/sessions', {
                           method: 'PUT',
@@ -290,14 +303,23 @@ export function useChatSession(opts: UseChatSessionOptions) {
           } else {
             readerRef.current = null;
             setIsLoading(false);
-            const currentMsgs = messagesRef.current;
-            const title = currentMsgs.length > 0 && currentMsgs[0].role === 'user'
-              ? currentMsgs[0].content.slice(0, 50)
+            // Compute final messages directly (messagesRef may be stale due to async React state)
+            const finalMsgs = messagesRef.current.map((m, i) => {
+              if (i === messagesRef.current.length - 1 && m.role === 'assistant' && m.status === 'running') {
+                return { ...m, status: 'succeeded' as const };
+              }
+              return m;
+            });
+            updateLastAssistantMessage((msg) =>
+              msg.status === 'running' ? { ...msg, status: 'succeeded' } : msg
+            );
+            const title = finalMsgs.length > 0 && finalMsgs[0].role === 'user'
+              ? finalMsgs[0].content.slice(0, 50)
               : undefined;
             fetch('/api/sessions', {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ id: sessionId, messages: currentMsgs, title }),
+              body: JSON.stringify({ id: sessionId, messages: finalMsgs, title }),
             }).catch(() => {});
             if (selectedProjectId) {
               opts.onSessionsRefresh(selectedProjectId);
@@ -384,11 +406,25 @@ export function useChatSession(opts: UseChatSessionOptions) {
         abortController: new AbortController(),
         streamContext: streamCtx!,
       });
+      // Persist messages to JSON so the session can be restored before the background stream completes
+      fetch('/api/sessions', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: currentSelectedSessionId, messages: messagesRef.current }),
+      }).catch(() => {});
       readerRef.current = null;
       currentRunIdRef.current = null;
       opts.onBgVersionBump();
     } else {
       cancelStream();
+      // Even without an active reader, persist current messages so they aren't lost
+      if (currentSelectedSessionId && messagesRef.current.length > 0) {
+        fetch('/api/sessions', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: currentSelectedSessionId, messages: messagesRef.current }),
+        }).catch(() => {});
+      }
     }
   }, [opts, cancelStream]);
 
