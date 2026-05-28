@@ -20,15 +20,15 @@ A web interface for interactive conversations with [Claude CLI](https://docs.ant
 
 ### Desktop
 
-![Desktop layout](docs/screenshots/desktop.png)
+![Desktop layout](screenshots/desktop.png)
 
 ### Mobile
 
-![Mobile chat](docs/screenshots/mobile-chat.png) ![Mobile history](docs/screenshots/mobile-history.png)
+![Mobile chat](screenshots/mobile-chat.png) ![Mobile history](screenshots/mobile-history.png)
 
 ### Tablet
 
-![Tablet layout](docs/screenshots/tablet.png) ![Tablet drawer](docs/screenshots/tablet-drawer.png)
+![Tablet layout](screenshots/tablet.png) ![Tablet drawer](screenshots/tablet-drawer.png)
 
 ## Prerequisites
 

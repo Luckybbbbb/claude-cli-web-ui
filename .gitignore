@@ -41,3 +41,6 @@ data/
 
 # test screenshots
 test-*.png
+
+# internal docs (not for public repo)
+docs/
