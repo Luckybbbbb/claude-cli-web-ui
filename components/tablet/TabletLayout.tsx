@@ -1,22 +1,19 @@
 'use client';
 
 import { useState, useCallback, useRef, useEffect, KeyboardEvent } from 'react';
-import { MessageList } from './MessageList';
-import { CommandPalette } from './CommandPalette';
-import { Header } from './Header';
-import { Sidebar } from './Sidebar';
-import { AddProjectModal } from './AddProjectModal';
-import { EmptyState } from './EmptyState';
 import { parseTrigger } from '@/lib/commands';
-import { useChatSession } from '@/hooks/useChatSession';
-import type { BackgroundRun } from '@/hooks/useChatSession';
+import { useChatSession, BackgroundRun } from '@/hooks/useChatSession';
 import { useProjectList } from '@/hooks/useProjectList';
 import { useSessionList } from '@/hooks/useSessionList';
+import { Header } from '../Header';
+import { Sidebar } from '../Sidebar';
+import { MessageList } from '../MessageList';
+import { CommandPalette } from '../CommandPalette';
+import { EmptyState } from '../EmptyState';
+import { AddProjectModal } from '../AddProjectModal';
 
-export type { BackgroundRun, Message } from '@/hooks/useChatSession';
-
-export function ChatPanel() {
-  // ── Background runs (shared across hooks) ──
+export function TabletLayout() {
+  // ── Background runs ──
   const backgroundRunsRef = useRef<Map<string, BackgroundRun>>(new Map());
   const [bgVersion, setBgVersion] = useState(0);
   const bumpBg = useCallback(() => setBgVersion(v => v + 1), []);
@@ -41,12 +38,11 @@ export function ChatPanel() {
     onSessionsRefresh: sessionList.refreshSessions,
   });
 
-  // ── UI-only state ──
+  // ── UI state ──
   const [input, setInput] = useState('');
   const [cursorPos, setCursorPos] = useState(0);
   const [paletteVisible, setPaletteVisible] = useState(false);
-
-  // ── DOM refs ──
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const inputBarRef = useRef<HTMLDivElement>(null);
 
@@ -55,10 +51,12 @@ export function ChatPanel() {
   const setSelectedSessionIdRef = useRef(chat.setSelectedSessionId);
   const setMessagesRef = useRef(chat.setMessages);
   const syncBgStatusRef = useRef(sessionList.syncBgStatus);
+  const loadSessionsRef = useRef(sessionList.loadSessions);
   setSessionsRef.current = sessionList.setSessions;
   setSelectedSessionIdRef.current = chat.setSelectedSessionId;
   setMessagesRef.current = chat.setMessages;
   syncBgStatusRef.current = sessionList.syncBgStatus;
+  loadSessionsRef.current = sessionList.loadSessions;
 
   // ── Load sessions when project changes ──
   useEffect(() => {
@@ -68,10 +66,10 @@ export function ChatPanel() {
       setSelectedSessionIdRef.current(null);
       return;
     }
+    loadSessionsRef.current(pid);
     fetch(`/api/sessions?projectId=${pid}`)
       .then(r => r.ok ? r.json() : { sessions: [] })
       .then(data => {
-        setSessionsRef.current(data.sessions || []);
         if (data.sessions?.length > 0) {
           setSelectedSessionIdRef.current(data.sessions[0].id);
           fetch(`/api/sessions/${data.sessions[0].id}`)
@@ -85,10 +83,7 @@ export function ChatPanel() {
       });
   }, [projectList.selectedProjectId]);
 
-  // ── Sync bg status to sessions ──
-  useEffect(() => {
-    syncBgStatusRef.current();
-  }, [bgVersion]);
+  useEffect(() => { syncBgStatusRef.current(); }, [bgVersion]);
 
   // ── Auto-resize textarea ──
   const adjustTextareaHeight = useCallback(() => {
@@ -107,7 +102,7 @@ export function ChatPanel() {
     }
   }, [input]);
 
-  // ── Visual viewport for virtual keyboard ──
+  // ── Visual viewport ──
   useEffect(() => {
     const vv = window.visualViewport;
     if (!vv) return;
@@ -124,13 +119,36 @@ export function ChatPanel() {
     };
   }, []);
 
-  // ── Project handlers (delegating to hooks) ──
+  // ── Swipe gesture for drawer ──
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    const onTouchStart = (e: TouchEvent) => {
+      const touch = e.touches[0];
+      touchStartRef.current = { x: touch.clientX, y: touch.clientY };
+    };
+    const onTouchEnd = (e: TouchEvent) => {
+      if (!touchStartRef.current) return;
+      const touch = e.changedTouches[0];
+      const dx = touch.clientX - touchStartRef.current.x;
+      const dy = Math.abs(touch.clientY - touchStartRef.current.y);
+      if (dy < 50 && touchStartRef.current.x < 30 && dx > 60) {
+        setDrawerOpen(true);
+      } else if (dy < 50 && drawerOpen && dx < -60) {
+        setDrawerOpen(false);
+      }
+      touchStartRef.current = null;
+    };
+    document.addEventListener('touchstart', onTouchStart, { passive: true });
+    document.addEventListener('touchend', onTouchEnd, { passive: true });
+    return () => {
+      document.removeEventListener('touchstart', onTouchStart);
+      document.removeEventListener('touchend', onTouchEnd);
+    };
+  }, [drawerOpen]);
+
+  // ── Handlers ──
   const handleSelectProject = useCallback((id: string) => {
-    chat.moveCurrentToBackground(
-      chat.selectedSessionId,
-      projectList.selectedProjectId,
-      chat.claudeSessionId,
-    );
+    chat.moveCurrentToBackground(chat.selectedSessionId, projectList.selectedProjectId, chat.claudeSessionId);
     chat.setMessages([]);
     chat.setIsLoading(false);
     projectList.selectProject(id);
@@ -138,6 +156,7 @@ export function ChatPanel() {
 
   const handleSelectSession = useCallback((sessionId: string) => {
     chat.selectSession(sessionId, chat.selectedSessionId, projectList.selectedProjectId);
+    setDrawerOpen(false);
   }, [chat, projectList]);
 
   const handleNewSession = useCallback(async () => {
@@ -157,17 +176,12 @@ export function ChatPanel() {
     chat.deleteSessionCleanup(sessionId);
   }, [projectList, sessionList, chat]);
 
-  // ── Submit ──
   const handleSubmit = useCallback(async (eOrText: React.FormEvent | string) => {
-    if (typeof eOrText !== 'string') {
-      eOrText.preventDefault();
-    }
+    if (typeof eOrText !== 'string') eOrText.preventDefault();
     const text = typeof eOrText === 'string' ? eOrText : input.trim();
     if (!text) return;
-
     setInput('');
     setPaletteVisible(false);
-
     await chat.sendMessage(
       text,
       projectList.selectedProject?.path,
@@ -183,7 +197,6 @@ export function ChatPanel() {
     );
   }, [input, chat, projectList, sessionList]);
 
-  // ── Quick action ──
   const handleQuickAction = useCallback((prompt: string) => {
     setInput(prompt);
     requestAnimationFrame(() => {
@@ -197,16 +210,24 @@ export function ChatPanel() {
   }, [adjustTextareaHeight]);
 
   return (
-    <div
-      className="flex h-screen"
-      style={{ backgroundColor: 'var(--bg-primary)' }}
-    >
-      {/* ── Sidebar ── */}
+    <div className="flex h-screen" style={{ backgroundColor: 'var(--bg-primary)' }}>
+      {/* Overlay */}
+      {drawerOpen && (
+        <div
+          className="fixed inset-0 z-40"
+          style={{ backgroundColor: 'rgba(0,0,0,0.3)' }}
+          onClick={() => setDrawerOpen(false)}
+        />
+      )}
+
+      {/* Sidebar drawer */}
       <div
-        className={`sidebar-panel shrink-0 ${projectList.sidebarCollapsed ? 'sidebar-collapsed' : ''}`}
+        className="fixed top-0 left-0 bottom-0 z-50"
         style={{
-          width: projectList.sidebarCollapsed ? '0px' : '280px',
-          overflow: 'hidden',
+          width: '280px',
+          maxWidth: '80vw',
+          transform: drawerOpen ? 'translateX(0)' : 'translateX(-100%)',
+          transition: 'transform 250ms ease',
         }}
       >
         <Sidebar
@@ -224,13 +245,13 @@ export function ChatPanel() {
         />
       </div>
 
-      {/* ── Main area ── */}
+      {/* Main area */}
       <div className="flex flex-col flex-1 min-w-0">
         <Header
           projectName={projectList.selectedProject?.name || ''}
           connected={chat.connected}
           model="Claude"
-          onToggleSidebar={projectList.toggleSidebar}
+          onToggleSidebar={() => setDrawerOpen(!drawerOpen)}
         />
 
         {chat.error && (
@@ -244,12 +265,7 @@ export function ChatPanel() {
               }}
             >
               {chat.error}
-              <button
-                onClick={() => chat.setError(null)}
-                className="ml-2 underline opacity-70 hover:opacity-100 transition-opacity"
-              >
-                关闭
-              </button>
+              <button onClick={() => chat.setError(null)} className="ml-2 underline opacity-70">关闭</button>
             </div>
           </div>
         )}
@@ -260,19 +276,12 @@ export function ChatPanel() {
           <MessageList messages={chat.messages} onSelectAnswer={chat.handleAnswer} />
         )}
 
-        {/* Input bar */}
         <div
           ref={inputBarRef}
           className="sticky bottom-0 shrink-0 input-bar-safe"
-          style={{
-            backgroundColor: 'var(--bg-primary)',
-            borderTop: '1px solid var(--border)',
-          }}
+          style={{ backgroundColor: 'var(--bg-primary)', borderTop: '1px solid var(--border)' }}
         >
-          <form
-            onSubmit={handleSubmit}
-            className="max-w-3xl mx-auto px-4 py-3 sm:py-4"
-          >
+          <form onSubmit={handleSubmit} className="max-w-3xl mx-auto px-4 py-3 sm:py-4">
             <div className="relative flex items-end">
               {paletteVisible && (
                 <CommandPalette
@@ -285,28 +294,20 @@ export function ChatPanel() {
                       setPaletteVisible(false);
                       return;
                     }
-
-                    const newText =
-                      input.slice(0, trigger.triggerStart) +
-                      replacement +
-                      input.slice(cursorPos);
-
+                    const newText = input.slice(0, trigger.triggerStart) + replacement + input.slice(cursorPos);
                     setInput(newText);
                     setPaletteVisible(false);
-
                     requestAnimationFrame(() => {
                       const textarea = textareaRef.current;
                       if (textarea) {
-                        const newCursorPos = trigger.triggerStart + replacement.length;
+                        const pos = trigger.triggerStart + replacement.length;
                         textarea.focus();
-                        textarea.setSelectionRange(newCursorPos, newCursorPos);
+                        textarea.setSelectionRange(pos, pos);
                         adjustTextareaHeight();
                       }
                     });
                   }}
-                  onClose={() => {
-                    setPaletteVisible(false);
-                  }}
+                  onClose={() => setPaletteVisible(false)}
                 />
               )}
 
@@ -335,14 +336,7 @@ export function ChatPanel() {
                 placeholder="输入消息，或使用 / 触发命令..."
                 disabled={chat.isLoading}
                 rows={1}
-                className="
-                  flex-1 resize-none text-base px-4 py-3
-                  rounded-2xl
-                  input-focus-ring
-                  outline-none
-                  disabled:opacity-50
-                  overflow-y-hidden
-                "
+                className="flex-1 resize-none text-base px-4 py-3 rounded-2xl input-focus-ring outline-none disabled:opacity-50 overflow-y-hidden"
                 style={{
                   maxHeight: '120px',
                   backgroundColor: 'var(--bg-secondary)',
@@ -354,15 +348,7 @@ export function ChatPanel() {
               <button
                 type="submit"
                 disabled={chat.isLoading || !input.trim()}
-                className="
-                  ml-2 shrink-0 w-10 h-10
-                  flex items-center justify-center
-                  rounded-full
-                  transition-all duration-100
-                  disabled:opacity-40 disabled:cursor-not-allowed
-                  hover:scale-105 active:scale-95
-                  focus:outline-none focus-visible:ring-2
-                "
+                className="ml-2 shrink-0 w-10 h-10 flex items-center justify-center rounded-full transition-all duration-100 disabled:opacity-40 disabled:cursor-not-allowed hover:scale-105 active:scale-95 focus:outline-none focus-visible:ring-2"
                 style={{
                   backgroundColor: (chat.isLoading || !input.trim()) ? 'var(--bg-secondary)' : 'var(--bg-user-bubble)',
                   /* @ts-expect-error CSS custom property */
@@ -370,33 +356,22 @@ export function ChatPanel() {
                 }}
                 aria-label="发送消息"
               >
-                <svg
-                  width="20"
-                  height="20"
-                  viewBox="0 0 24 24"
-                  fill="none"
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
                   stroke={chat.isLoading || !input.trim() ? 'var(--text-secondary)' : '#ffffff'}
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
+                  strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
                 >
                   <line x1="12" y1="19" x2="12" y2="5" />
                   <polyline points="5 12 12 5 19 12" />
                 </svg>
               </button>
             </div>
-
-            <div
-              className="mt-1.5 text-center text-xs"
-              style={{ color: 'var(--text-secondary)', opacity: 0.7 }}
-            >
+            <div className="mt-1.5 text-center text-xs" style={{ color: 'var(--text-secondary)', opacity: 0.7 }}>
               使用 / 触发命令 · 使用 @ 引用文件
             </div>
           </form>
         </div>
       </div>
 
-      {/* ── Add/Edit Project Modal ── */}
       <AddProjectModal
         open={projectList.modalOpen}
         project={projectList.editingProject}

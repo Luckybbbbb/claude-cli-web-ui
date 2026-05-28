@@ -27,6 +27,8 @@ export interface FileEntry {
 export interface TriggerInfo {
   type: 'command' | 'file' | 'url' | null;
   query: string;
+  /** Absolute position of the trigger character in the input string */
+  triggerStart: number;
 }
 
 export async function fetchCommands(): Promise<Command[]> {
@@ -54,7 +56,7 @@ export function parseTrigger(
   cursorPos: number,
 ): TriggerInfo {
   if (cursorPos < 1 || cursorPos > text.length) {
-    return { type: null, query: '' };
+    return { type: null, query: '', triggerStart: -1 };
   }
 
   const textBeforeCursor = text.slice(0, cursorPos);
@@ -98,19 +100,19 @@ export function parseTrigger(
 
     if (prefix.startsWith('file')) {
       const query = prefix.slice(4);
-      return { type: 'file', query };
+      return { type: 'file', query, triggerStart: lastNewline + 1 + atTriggerIndex };
     }
     if (prefix.startsWith('url')) {
-      return { type: 'url', query: '' };
+      return { type: 'url', query: '', triggerStart: lastNewline + 1 + atTriggerIndex };
     }
     // Bare @ or unrecognized prefix - show file by default
-    return { type: 'file', query: prefix };
+    return { type: 'file', query: prefix, triggerStart: lastNewline + 1 + atTriggerIndex };
   }
 
   if (slashTriggerIndex >= 0) {
     const query = lineBeforeCursor.slice(slashTriggerIndex + 1);
-    return { type: 'command', query };
+    return { type: 'command', query, triggerStart: lastNewline + 1 + slashTriggerIndex };
   }
 
-  return { type: null, query: '' };
+  return { type: null, query: '', triggerStart: -1 };
 }

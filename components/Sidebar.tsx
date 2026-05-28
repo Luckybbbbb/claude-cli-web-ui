@@ -190,9 +190,10 @@ export function Sidebar({
                   </div>
                 </div>
 
-                {/* Action buttons (visible on hover) */}
-                {(isHovered || isSelected) && (
-                  <div className="flex items-center gap-0.5 shrink-0">
+                {/* Action buttons (visible on hover or touch) */}
+                <div className={`flex items-center gap-0.5 shrink-0 transition-opacity duration-100 ${
+                  (isHovered || isSelected) ? 'opacity-100' : 'max-md:opacity-60 md:opacity-0 md:group-hover:opacity-100'
+                }`}>
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -216,7 +217,6 @@ export function Sidebar({
                       <XIcon />
                     </button>
                   </div>
-                )}
               </div>
 
               {/* Session list (when expanded) */}
@@ -318,37 +318,37 @@ export function Sidebar({
                           )}
                         </div>
 
-                        {/* Delete button (visible on hover) */}
-                        {isSessionHovered && (
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              const confirmed = window.confirm(
-                                `确定删除会话「${session.title}」吗？此操作不可撤销。`
-                              );
-                              if (confirmed) {
-                                onDeleteSession(session.id);
-                              }
-                            }}
-                            className="p-0.5 rounded transition-colors duration-100 hover:bg-black/10 dark:hover:bg-white/10 shrink-0"
-                            style={{ color: 'var(--text-secondary)' }}
-                            title="Delete session"
+                        {/* Delete button (visible on hover or touch) */}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const confirmed = window.confirm(
+                              `确定删除会话「${session.title}」吗？此操作不可撤销。`
+                            );
+                            if (confirmed) {
+                              onDeleteSession(session.id);
+                            }
+                          }}
+                          className={`p-0.5 rounded transition-all duration-100 hover:bg-black/10 dark:hover:bg-white/10 shrink-0 ${
+                            isSessionHovered ? 'opacity-100' : 'max-md:opacity-60 md:opacity-0 md:group-hover:opacity-100'
+                          }`}
+                          style={{ color: 'var(--text-secondary)' }}
+                          title="Delete session"
+                        >
+                          <svg
+                            width="12"
+                            height="12"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
                           >
-                            <svg
-                              width="12"
-                              height="12"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            >
-                              <line x1="18" y1="6" x2="6" y2="18" />
-                              <line x1="6" y1="6" x2="18" y2="18" />
-                            </svg>
-                          </button>
-                        )}
+                            <line x1="18" y1="6" x2="6" y2="18" />
+                            <line x1="6" y1="6" x2="18" y2="18" />
+                          </svg>
+                        </button>
                       </div>
                     );
                   })}

@@ -39,6 +39,7 @@ claude-cli-web-ui/
     EmptyState.tsx               -- 空状态首页（快捷操作）
     Header.tsx                   -- 顶栏（项目名 + 连接状态 + 模型）
     MessageList.tsx              -- 消息列表（气泡 + 头像 + 动画）
+    QuestionCard.tsx             -- AskUserQuestion 交互式问答卡片（单选/多选）
     QuickAction.tsx              -- 快捷操作卡片
     Sidebar.tsx                  -- 可收缩侧边栏（项目列表 + 会话列表）
     ThinkingBlock.tsx            -- 思考块（淡黄色 + 折叠）
@@ -63,11 +64,13 @@ claude-cli-web-ui/
 ### 数据流
 
 1. 用户在 ChatPanel 输入消息 -> POST /api/chat（携带 claudeSessionId 支持 --resume）
-2. 服务端解析 @file/@url 引用，spawn Claude CLI 子进程（--print --verbose --output-format stream-json [--resume sessionId]）
-3. 客户端通过 fetch + ReadableStream 读取 /api/runs/{id}/events 的 SSE 流
-4. claude-stream.ts 解析 JSONL 行为结构化事件（text_delta, tool_use, thinking_delta 等）
-5. UI 实时渲染消息气泡、工具卡片、思考块
-6. 对话完成后，ChatPanel 自动将会话（消息 + claudeSessionId）持久化到服务端文件系统
+2. 服务端解析 @file/@url 引用，spawn Claude CLI 子进程（--print --verbose --output-format stream-json --input-format stream-json [--resume sessionId]）
+3. 用户消息以 JSONL 格式写入 stdin（保持打开），Claude CLI 通过 stdout 输出 stream-json
+4. 客户端通过 fetch + ReadableStream 读取 /api/runs/{id}/events 的 SSE 流
+5. claude-stream.ts 解析 JSONL 行为结构化事件（text_delta, tool_use, thinking_delta 等）
+6. UI 实时渲染消息气泡、工具卡片、思考块、交互式问答卡片
+7. AskUserQuestion 工具触发时，QuestionCard 渲染选项，用户选择后通过 tool-result API 回传答案到 stdin
+8. 对话完成后（所有 AskUserQuestion 已回答，stdin 关闭），ChatPanel 自动将会话持久化到服务端文件系统
 
 ### 命令发现系统
 
@@ -112,6 +115,16 @@ claude-cli-web-ui/
 - 创建后自动刷新会话列表
 - 使用 activeSessionId 局部变量避免闭包引用过期
 
+### 交互式问答 (AskUserQuestion)
+
+- Claude CLI 通过 --input-format stream-json 启用 stdin/stdout 双向 JSONL 通信
+- AskUserQuestion tool_use 事件到达时，tool_use_id 加入 pendingHostAnswers Set
+- QuestionCard 组件渲染交互式选项卡片（单选/多选），用户选择后调用 handleAnswer
+- handleAnswer 通过 POST /api/runs/{id}/tool-result 将答案回传
+- tool-result API 构建 tool_result JSONL 写入 stdin，从 pendingHostAnswers 移除
+- 当 pendingHostAnswers 为空时关闭 stdin，Claude 完成对话
+- stdin 保持打开期间 run.stdinOpen = true，允许多轮交互
+
 ### LAN 访问
 
 - dev 脚本绑定 0.0.0.0（`next dev -H 0.0.0.0 -p 0`），支持局域网设备访问
@@ -138,8 +151,8 @@ pnpm test    # 运行测试
 
 ## 文档版本追踪
 
-- **上次文档更新版本**: 936463a
-- **当前文档更新版本**: d989852
+- **上次文档更新版本**: d989852
+- **当前文档更新版本**: 7b697a5
 - **更新日期**: 2026-05-27
 
 ## 项目文档索引

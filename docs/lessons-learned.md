@@ -4,13 +4,14 @@
 ## 概览
 
 ### 问题分类
-- **Claude CLI 集成问题**: stream-json 格式兼容性、进程管理、--resume 会话续接
+- **Claude CLI 集成问题**: stream-json 格式兼容性、进程管理、--resume 会话续接、stdin 双向通信
 - **SSE 流通信**: 重复发送、连接管理、turn_end 时序、前台/后台分发
 - **命令发现系统**: 插件目录结构差异、frontmatter 解析
 - **状态管理**: React 不可变更新、竞态条件、闭包过期
 - **文件引用与安全**: @file/@url 内容注入、截断策略、超时控制、路径遍历防护
 - **数据持久化**: 会话淘汰策略、跨项目搜索
 - **后台进程管理**: 流状态保存、恢复、清理
+- **交互式问答**: AskUserQuestion 双向通信、stdin 生命周期管理、shell 转义
 
 ### 关键经验
 - Claude CLI 的 stream-json 格式存在新旧版本差异，需要同时兼容有/无 --include-partial-messages 的情况
@@ -19,6 +20,8 @@
 - --resume 参数可恢复 Claude CLI 的对话上下文，但需要正确保存和传递 claudeSessionId
 - 用户输入中的文件/URL 引用必须在服务端解析，不能信任客户端
 - 切换上下文时不应中断进行中的异步操作，应将其"移入后台"而非取消
+- 通过 --input-format stream-json 启用 stdin 双向通信，prompt 以 JSONL 格式写入避免 shell 转义问题
+- stdin 生命周期管理需要配合 pendingHostAnswers 追踪机制，确保所有交互完成后才关闭
 
 ### 预防建议
 - 始终使用防御性解析处理 JSONL 输入
@@ -27,6 +30,7 @@
 - 用户可控的内容注入需要设置截断上限和超时控制
 - 文件 API 必须包含路径遍历防护（拒绝 ".." 路径）
 - 使用局部变量捕获当前值避免闭包引用过期
+- 向外部进程传递用户内容时，使用 JSONL/结构化格式替代命令行参数，避免 shell 转义问题
 <!-- OVERVIEW_END -->
 
 ---
@@ -172,3 +176,26 @@
 - **根本原因**: 目录下的文件数量和总大小不可预测，无上限的递归扫描会导致资源耗尽。
 - **解决方案**: 实现双层限制——单文件超过 50KB 直接跳过，总内容超过 200KB 时截断当前文件并显示省略文件数。最大递归深度 5 层。
 - **预防建议**: 处理用户可控的集合数据时，始终设置总预算上限和单项上限。超出预算时提供明确的截断提示（如 "N more file(s) omitted"），让用户知道有内容被省略。
+
+## 交互式问答
+
+### 19. Shell 转义问题与 JSONL stdin 方案
+
+- **问题描述**: 用户消息中包含引号、特殊字符（如 @file 引用的文件路径含空格或特殊符号）时，作为命令行位置参数传递给 Claude CLI 会导致 shell 解释错误，消息内容被截断或变形。
+- **根本原因**: spawn 的 shell: true 模式下，位置参数会被 shell 解释器处理，用户内容中的 `"`、`$`、`` ` ``、`\` 等字符被 shell 特殊处理。即使使用引号包裹，多层嵌套的引号场景也很难正确转义。
+- **解决方案**: 改用 `--input-format stream-json` 参数启用 stdin JSONL 输入模式。用户消息以 JSON 格式 `{ type: 'user', message: { role: 'user', content: [{ type: 'text', text: ... }] } }` 写入 stdin，完全绕过 shell 解析。同时保持 stdin 打开以支持后续 tool_result 回传。
+- **预防建议**: 当需要向子进程传递用户可控的文本内容时，优先使用 stdin 管道（JSONL/JSON 格式）而非命令行参数。命令行参数始终存在 shell 解释风险，即使使用 escape 函数也难以覆盖所有边界情况。
+
+### 20. stdin 生命周期与 pendingHostAnswers 追踪
+
+- **问题描述**: AskUserQuestion 工具需要用户在 Web 端选择答案后回传给 Claude CLI。如果 stdin 过早关闭，Claude 无法接收 tool_result；如果永不关闭，Claude 进程无法正常退出。
+- **根本原因**: stdin 的打开/关闭时序与异步交互式问答的生命周期耦合。Claude 可能在一次对话中发起多个 AskUserQuestion，每个都需要独立的回传，只有全部完成后才能关闭 stdin。
+- **解决方案**: 引入 `pendingHostAnswers: Set<string>` 追踪未回答的 AskUserQuestion tool_use ID。chat route 在事件回调中检测 AskUserQuestion tool_use 并加入 Set；tool-result API 在写入答案后从 Set 中移除；当 Set 为空时调用 `stdin.end()` 关闭 stdin。
+- **预防建议**: 管理子进程 stdin 生命周期时，使用引用计数或 Set 追踪机制来决定何时关闭。不要基于固定时序（如 "turn_end 后关闭"）来管理 stdin，因为异步交互可能在任何时候发生。
+
+### 21. handleAnswer 从新消息变通改为 tool-result API
+
+- **问题描述**: 最初实现 AskUserQuestion 回答时，使用"发送新用户消息"的方式将答案传递给 Claude，但这会创建新的对话轮次，破坏了 tool_result 的语义。
+- **根本原因**: tool_result 在 Claude API 语义中是对特定 tool_use 的回复，不是新的用户消息。通过新消息发送答案会导致 Claude 将其视为独立输入而非工具调用的结果，可能引发重复调用或上下文混乱。
+- **解决方案**: handleAnswer 改为调用 POST /api/runs/{id}/tool-result API，该 API 构建 `type: 'tool_result'` 格式的 JSONL 消息直接写入 stdin。这样 Claude CLI 能正确识别为工具调用的回复，而非新的用户输入。
+- **预防建议**: 在实现交互式工具回传时，必须使用工具原生的回传机制（tool_result），而非通过用户消息通道变通传递。保持与 Claude API 的语义一致性。

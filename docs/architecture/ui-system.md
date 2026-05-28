@@ -6,7 +6,7 @@
 ### 核心概念
 - **Kimi 风格设计系统**: 黑白灰配色，CSS 变量驱动，支持亮色/暗色模式
 - **组件树结构**: ChatPanel 为核心状态容器，管理 Sidebar/Header/MessageList/CommandPalette 等子组件
-- **消息渲染管线**: AgentEvent[] -> Block[]（text/thinking/tool）-> 对应组件渲染
+- **消息渲染管线**: AgentEvent[] -> Block[]（text/thinking/tool/question）-> 对应组件渲染
 
 ### 关键数据结构
 - `Message { id, role, content, events?: AgentEvent[], status? }`: 聊天消息
@@ -100,6 +100,8 @@ AgentEvent[] -> 累积 text/thinking -> 遇到 tool_use 时 flush -> Block[]
 - `tool_use`: flush 文本和思考，创建 tool block（附带 result）
 - `turn_end`: flush 剩余内容
 
+**AskUserQuestion 分支**: tool block 渲染时，如果 tool.name === 'AskUserQuestion'，渲染 QuestionCard 而非 ToolCard。需要 onSelectAnswer 回调以支持用户选择后回传答案。
+
 #### ToolCard
 
 - 左侧色条：绿色（成功）、红色（错误）、默认强调色（进行中）
@@ -112,6 +114,22 @@ AgentEvent[] -> 累积 text/thinking -> 遇到 tool_use 时 flush -> Block[]
 - 淡黄色背景 (#fefce8)
 - 默认折叠，显示 "思考中... (N 字)"
 - 点击展开显示完整思考内容
+
+#### QuestionCard
+
+AskUserQuestion 工具的专用交互卡片组件（228 行）。
+
+- **数据模型**:
+  - `Question { question, header?, options: QuestionOption[], multiSelect? }`
+  - `QuestionOption { label, description?, preview? }`
+- **视觉风格**: 左侧紫色色条 (#6366f1)，SVG 问号图标，与 ToolCard 风格统一
+- **选择交互**:
+  - 单选模式：radio 样式圆形指示器，点击切换
+  - 多选模式：checkbox 样式方形指示器，点击切换选中/取消
+  - selectedMap 状态：`Record<questionIndex, selectedLabels[]>`
+- **确认按钮**: 独立"确认选择"按钮，所有问题都至少选择一个选项后激活
+- **提交后**: 显示"已回答"绿色徽章，未选中选项降低透明度（opacity: 0.5）
+- **回调**: `onSelect(toolUseId, answer)` 将答案传递给 ChatPanel 的 handleAnswer
 
 #### CommandPalette
 

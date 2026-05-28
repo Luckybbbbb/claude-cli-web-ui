@@ -4,7 +4,7 @@
 ## 概览
 
 ### 版本范围
-- 初始版本 81ddbf4 到当前版本 d989852，涵盖项目从零搭建到功能完善的全过程
+- 初始版本 81ddbf4 到当前版本 7b697a5，涵盖项目从零搭建到功能完善的全过程
 
 ### 变更模块
 - **核心通信**: SSE 流式通信、Claude CLI 进程管理、stream-json 解析
@@ -14,6 +14,7 @@
 - **文件选择器**: 树形文件浏览器、懒加载目录、独立确认按钮
 - **后台进程**: 切换项目不中断 Claude CLI 进程、会话状态实时显示
 - **API 层**: 对话、命令发现、文件扫描、项目 CRUD、会话 CRUD
+- **交互式问答**: AskUserQuestion 工具支持、QuestionCard 组件、stdin JSONL 双向通信
 
 ### 关键变更点
 - 从基础 ChatPanel + SSE 演进为完整的命令面板 + 项目管理 + 侧边栏架构
@@ -22,6 +23,9 @@
 - 发送消息时自动创建会话，无需手动新建
 - LAN 访问支持（绑定 0.0.0.0，自动分配端口）
 - 文件夹 @file 引用支持递归扫描，200KB 总截断
+- AskUserQuestion 交互式支持：通过 --input-format stream-json 实现 stdin/stdout 双向通信
+- stdin 改为 JSONL 格式写入并保持打开，解决了 shell 转义问题
+- QuestionCard 组件实现单选/多选交互式问答卡片
 <!-- OVERVIEW_END -->
 
 ---
@@ -43,6 +47,7 @@
 | 936463a | 2026-05-27 | 会话系统 | Session history + @file/@url + --resume |
 | 29ef54a | 2026-05-27 | 设计文档 | 树形文件选择器 + 后台进程 + 自动会话设计 |
 | d989852 | 2026-05-27 | 重大迭代 | 树形文件选择器 + 后台进程管理 + 自动会话 + LAN |
+| 7b697a5 | 2026-05-27 | 交互式问答 | AskUserQuestion 交互式支持 + QuestionCard + stdin JSONL |
 
 ---
 
@@ -444,3 +449,48 @@
   - 新增 .superpowers/ 忽略
   - 新增 data/ 忽略（项目数据目录）
   - 新增 .claude/settings.local.json 忽略
+
+### 2026-05-27: AskUserQuestion 交互式支持
+
+#### 模块: 核心通信
+
+- **7b697a5** `feat: add AskUserQuestion interactive support with stdin stream-json input`
+
+  - **更新** app/api/chat/route.ts
+    - Claude CLI 参数新增 `--input-format stream-json`，启用 stdin 多轮交互
+    - 移除 prompt 作为位置参数（之前 `args.push(resolvedMessage)`），改为通过 stdin JSONL 写入
+    - stdin 写入格式：`{ type: 'user', message: { role: 'user', content: [{ type: 'text', text: ... }] } }`
+    - 保持 stdin 打开（`run.stdinOpen = true`），支持后续 tool_result 回传
+    - 在 stream handler 中追踪 AskUserQuestion tool_use 事件：`run.pendingHostAnswers.add(event.id)`
+
+#### 模块: 交互式问答组件
+
+  - **新建** components/QuestionCard.tsx
+    - AskUserQuestion 工具的专用交互卡片组件（228 行）
+    - 支持 Question 数据模型：question, header, options, multiSelect
+    - 选项卡片：radio（单选）或 checkbox（多选）样式指示器
+    - selectedMap 状态管理：`Record<questionIndex, selectedLabels[]>`
+    - 独立"确认选择"按钮：所有问题都选择后才可点击
+    - 提交后显示"已回答"徽章，未选中选项降低透明度
+    - 左侧紫色色条（#6366f1），SVG 问号图标
+    - 提交回调 `onSelect(toolUseId, answer)` 传递给父组件
+
+  - **更新** components/AssistantMessage.tsx
+    - 新增 `onSelectAnswer` prop 回调
+    - tool block 渲染逻辑分支：AskUserQuestion 工具渲染 QuestionCard，其他工具渲染 ToolCard
+    - 从 tool.input 中提取 questions 数组传递给 QuestionCard
+
+  - **更新** components/MessageList.tsx
+    - 新增 `onSelectAnswer` prop，透传给 AssistantMessage
+
+#### 模块: 问答回传机制
+
+  - **更新** components/ChatPanel.tsx
+    - 新增 `handleAnswer` 回调：通过 POST /api/runs/{runId}/tool-result 回传用户选择
+    - handleSubmit 支持字符串参数（`eOrText: React.FormEvent | string`），为 handleAnswer 预留扩展
+    - MessageList 传入 `onSelectAnswer={handleAnswer}`
+
+  - **已有** app/api/runs/[id]/tool-result/route.ts（前版本已实现）
+    - 接收 `{ toolUseId, content }` 后构建 `type: 'user'` + `tool_result` JSONL 消息
+    - 通过 stdin.write 写入 Claude CLI 进程
+    - 从 pendingHostAnswers 中移除，无待回答时关闭 stdin

@@ -396,16 +396,9 @@ export function CommandPalette({
       const item = allItems.find((i) => i.name === value);
       if (!item) return;
 
-      let replacement = value;
-
-      // Plugin skills/commands use /plugin-name:skill-name format
-      if (item.source === 'plugin' && item.plugin) {
-        // Strip leading / from item name, prepend /plugin-name:
-        const skillPart = value.startsWith('/') ? value.slice(1) : value;
-        replacement = `/${item.plugin}:${skillPart}`;
-      }
-
-      onSelect(replacement);
+      // item.name from command-discovery already contains the full
+      // /plugin-name:skill-name format — use it directly as replacement
+      onSelect(value);
     },
     [allItems, onSelect],
   );
