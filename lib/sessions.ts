@@ -198,3 +198,87 @@ export async function evictOldSessions(projectId: string, maxSessions = 20): Pro
   const toDelete = sessions.slice(0, sessions.length - maxSessions);
   await Promise.all(toDelete.map((s) => unlink(s.filePath)));
 }
+
+// ---------------------------------------------------------------------------
+// CLI Session Discovery Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Find a session by its claudeSessionId (the CLI-assigned session identifier).
+ * Scans all project directories under data/sessions/ and returns the first match.
+ */
+export async function findSessionByClaudeSessionId(claudeSessionId: string): Promise<Session | null> {
+  const sessionsRoot = join(process.cwd(), 'data', 'sessions');
+  if (!existsSync(sessionsRoot)) {
+    return null;
+  }
+
+  const projectDirs = await readdir(sessionsRoot);
+  for (const projectId of projectDirs) {
+    const projectDir = join(sessionsRoot, projectId);
+    let files: string[];
+    try {
+      files = await readdir(projectDir);
+    } catch {
+      continue;
+    }
+
+    const jsonFiles = files.filter((f) => f.endsWith('.json'));
+    for (const file of jsonFiles) {
+      try {
+        const content = await readFile(join(projectDir, file), 'utf-8');
+        const session: Session = JSON.parse(content);
+        if (session.claudeSessionId === claudeSessionId) {
+          return session;
+        }
+      } catch {
+        // skip corrupted files
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Create a new session pre-populated with a CLI-discovered claudeSessionId and title.
+ * Follows the same pattern as createSession() and runs eviction afterwards.
+ */
+export async function createSessionFromCli(
+  projectId: string,
+  cwd: string,
+  claudeSessionId: string,
+  title: string,
+): Promise<Session> {
+  await ensureSessionsDir(projectId);
+
+  const now = new Date().toISOString();
+  const session: Session = {
+    id: generateId(),
+    projectId,
+    title,
+    cwd,
+    claudeSessionId,
+    messages: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const filePath = getSessionPath(projectId, session.id);
+  await writeFile(filePath, JSON.stringify(session, null, 2), 'utf-8');
+
+  await evictOldSessions(projectId);
+
+  return session;
+}
+
+/**
+ * Update only the messages (and updatedAt) of an existing session.
+ * Delegates to updateSession() internally so the rest of the fields stay untouched.
+ */
+export async function updateSessionMessages(
+  sessionId: string,
+  messages: SessionMessage[],
+): Promise<Session> {
+  return updateSession(sessionId, { messages });
+}

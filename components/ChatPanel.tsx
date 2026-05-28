@@ -70,15 +70,28 @@ export function ChatPanel() {
     }
     fetch(`/api/sessions?projectId=${pid}`)
       .then(r => r.ok ? r.json() : { sessions: [] })
-      .then(data => {
-        setSessionsRef.current(data.sessions || []);
-        if (data.sessions?.length > 0) {
-          setSelectedSessionIdRef.current(data.sessions[0].id);
-          fetch(`/api/sessions/${data.sessions[0].id}`)
+      .then(async data => {
+        // CLI session discovery: find sessions from Claude CLI for this project
+        let sessions = data.sessions || [];
+        try {
+          const discResp = await fetch(`/api/sessions/cli-discover?projectId=${pid}`);
+          if (discResp.ok) {
+            const discData = await discResp.json();
+            if (discData.sessions?.length > 0) {
+              sessions = discData.sessions;
+            }
+          }
+        } catch {
+          // discovery failure is non-fatal, keep existing sessions
+        }
+        setSessionsRef.current(sessions);
+        if (sessions.length > 0) {
+          setSelectedSessionIdRef.current(sessions[0].id);
+          fetch(`/api/sessions/${sessions[0].id}/history`)
             .then(r => r.ok ? r.json() : null)
             .then(sData => {
-              if (sData?.session?.messages) {
-                setMessagesRef.current(sData.session.messages);
+              if (sData?.messages) {
+                setMessagesRef.current(sData.messages);
               }
             });
         }
